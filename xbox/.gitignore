@@ -1,0 +1,108 @@
+# Binaries for programs and plugins
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/out/
+/build/
+/ddd/
+/tdd/
+/Testing/
+
+# CMake
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+CMakeUserPresets.json
+
+# Test binary
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# VSCode
+/.vscode/
+
+# Vim
+/compile_commands.json
+/.cache/
+*.swap
+
+# MacOS
+.DS_Store
+
+.fpm
+
+# Misc
+*.log
+*.log.[0-9]*
+*.tmp
+*.rotate[0-9]*
+*_test.c
+a.out
+*_test.json
+*_test.txt
+*_test.bin
+test.json
+test.json.enc
+test.json.security
+
+
+ToolchainAARCH64.cmake
+ToolchainARM.cmake
+SConscript
+anywhere
+
+# Doxygen
+html/
+latex/
+Doxyfile.bak
+
+# Generated files
+# xbox_version.h

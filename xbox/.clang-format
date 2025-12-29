@@ -1,0 +1,13 @@
+# Based on Google C/C++ Code Style settings
+# https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+# Author: Oswin, ouzw.mail (at) gmail.com
+
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 2
+CommentPragmas: '^@'
+BinPackParameters: false
+BinPackArguments: false
+AlignAfterOpenBracket: Align
+PenaltyBreakAssignment: 1000
+PenaltyBreakBeforeFirstCallParameter: 1000

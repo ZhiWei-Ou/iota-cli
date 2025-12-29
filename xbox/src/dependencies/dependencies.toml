@@ -1,0 +1,11 @@
+[[dependencies]]
+name = "cJSON"
+source = "https://github.com/DaveGamble/cJSON.git"
+branch = "v1.7.18"
+commit = "acc76239bee01d8e9c858ae2cab296704e52d916"
+
+[[dependencies]]
+name = "tiny-AES-c"
+source = "https://github.com/kokke/tiny-AES-c.git"
+branch = "master"
+commit = "23856752fbd139da0b8ca6e471a13d5bcc99a08d"
