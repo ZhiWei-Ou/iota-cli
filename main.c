@@ -19,8 +19,9 @@ char *checkout_script = NULL;
 xbool_t checkout_reboot = xFALSE;
 
 char *update_image = NULL;
-xbool_t update_skip_checksum = xFALSE;
+xbool_t update_skip_auth_tag = xFALSE;
 xbool_t update_reboot = xFALSE;
+int stream_count = 4096;
 
 int (*feature_entry)() = NULL;
 static void use_checkout_feature(xoptions context);
@@ -40,7 +41,8 @@ int main(int argc, char** argv){
     xoptions_set_posthook(update, use_update_feature);
     xoptions_add_string(update, 'i', "image", "<image.iota>", "The image file to update.", &update_image, xTRUE);
     xoptions_add_boolean(update, '\0', "reboot", "Reboot after update.", &update_reboot);
-    xoptions_add_boolean(update, '\0', "skip-checksum", "Skip checksum verification.", &update_skip_checksum);
+    xoptions_add_boolean(update, '\0', "skip-auth", "Skip auth tag.", &update_skip_auth_tag);
+    xoptions_add_number(update, 's', "stream-count", "<count>", "The stream count for updating process.", &stream_count, xFALSE);
 
     err_t parse_err = xoptions_parse(opts, argc, argv);
     xoptions_destroy(opts);

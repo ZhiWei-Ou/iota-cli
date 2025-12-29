@@ -30,7 +30,8 @@ Header:
     - Magic Number (4 bytes) "IOTA"
     - DateTime (20 bytes) "YYYY-MM-DD HH:MM:SS"
     - Total Size (4 bytes)
-    - Signature (256 bytes)
+    - IV (12 bytes)
+    - Signature (256 bytes) ""
     - Reserved (12 bytes)
 
 Workflow:
