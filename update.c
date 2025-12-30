@@ -9,6 +9,7 @@
 #include "xlog.h"
 #include <string.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <openssl/err.h>
 
 #define AES_GCM_KEY_LEN  ( 16 )
@@ -22,6 +23,8 @@ const uint8_t key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 
 extern char *update_image;
 extern xbool_t update_skip_auth_tag;
 extern xbool_t update_reboot;
+extern xbool_t update_skip_verify;
+extern char *update_public_key_pem;
 extern int stream_count;
 
 #pragma pack(push, 1)
@@ -30,7 +33,6 @@ typedef struct {
     char datetime[20];
     uint32_t size;
     uint8_t iv[AES_GCM_IV_LEN];
-    uint8_t signature[RSA_SIGNATURE_LEN];
     uint8_t reserved[12];
 } image_header_t;
 #pragma pack(pop)
@@ -46,11 +48,22 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
                                 int stream_count,
                                 xbool_t skip_auth_tag);
 
+static err_t verify_rsa_signature(FILE *in,
+                                  size_t size,
+                                  const uint8_t *signature,
+                                  size_t signature_size,
+                                  const char *public_key_pem_path);
+
 int update_feature_entry() {
     if (!update_image) {
         XLOG_E("No update image specified.");
         return X_RET_INVAL;
     }
+
+    XLOG_I("Starting update, firmware package: '%s', verification public key file: '%s'",
+           update_image, update_public_key_pem ? update_public_key_pem : "(none)");
+
+    XLOG_I("Stream decryption signature verification, single stream %d bytes", stream_count);
 
     FILE *in = os_file_open(update_image, "rb");
     if (!in) {
@@ -60,7 +73,8 @@ int update_feature_entry() {
 
     err_t err = X_RET_OK;
     image_header_t header = {0};
-    uint8_t tag[16] = {0};
+    uint8_t tag[AES_GCM_TAG_LEN] = {0};
+    uint8_t signature[RSA_SIGNATURE_LEN] = {0};
 
     // Read IOTA header
     size_t header_read_size = fread(&header, 1, sizeof(image_header_t), in);
@@ -71,7 +85,7 @@ int update_feature_entry() {
     }
 
     // Read IOTA AES-GCM tag
-    fseek(in, -AES_GCM_TAG_LEN, SEEK_END);
+    fseek(in, sizeof(image_header_t) + header.size - AES_GCM_TAG_LEN, SEEK_SET);
     size_t tag_read_size = fread(tag, 1, sizeof(tag), in);
     if (tag_read_size != sizeof(tag)) {
         XLOG_E("Failed to read image tag.");
@@ -80,11 +94,49 @@ int update_feature_entry() {
     }
     // XLOG_HEX_DUMP("Image tag:", tag, sizeof(tag));
 
+    // Read Signature
+    fseek(in, -RSA_SIGNATURE_LEN, SEEK_END);
+    size_t sig_read_size = fread(signature, 1, sizeof(signature), in);
+    if (sig_read_size != sizeof(signature)) {
+        XLOG_E("Failed to read image signature.");
+        os_file_close(in);
+        return X_RET_ERROR;
+    }
+    // XLOG_HEX_DUMP("Image signature:", signature, sizeof(signature));
+
     // Validate magic
     if (memcmp(header.magic, magic, sizeof(magic)) != 0) {
         XLOG_E("Invalid image magic.");
         os_file_close(in);
         return X_RET_BADFMT;
+    }
+
+    // Verify signature
+    if (!update_skip_verify) {
+        if (update_public_key_pem == NULL) {
+            XLOG_E("No public key PEM file specified for signature verification.");
+            os_file_close(in);
+            return X_RET_INVAL;
+        }
+
+        XLOG_I("Verifying image signature...");
+
+        fseek(in, 0, SEEK_SET); // Seek back to the beginning for signature verification
+        err = verify_rsa_signature(in,
+                                   sizeof(image_header_t) + header.size,
+                                   signature,
+                                   sizeof(signature),
+                                   update_public_key_pem);
+
+        if (err != X_RET_OK) {
+            XLOG_E("Image signature verification failed.");
+            os_file_close(in);
+            return err;
+        }
+
+        XLOG_I("Image signature verified successfully.");
+    } else {
+        XLOG_W("Skipping image signature verification as per user request.");
     }
 
     XLOG_D("Image datetime: %.20s", header.datetime);
@@ -101,8 +153,14 @@ int update_feature_entry() {
         return X_RET_ERROR;
     }
 
-    err = stream_decrypt_gcm(in, out, key, header.iv, (size_t)header.size, tag,
-                             stream_count, update_skip_auth_tag);
+    err = stream_decrypt_gcm(in,
+                             out,
+                             key,
+                             header.iv,
+                             (size_t)header.size,
+                             tag,
+                             stream_count,
+                             update_skip_auth_tag);
     if (err != X_RET_OK) {
         os_file_close(in);
         os_file_close(out);
@@ -111,6 +169,7 @@ int update_feature_entry() {
 
     os_file_close(out);
     os_file_close(in);
+
     return X_RET_OK;
 }
 
@@ -129,7 +188,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
     err_t err = X_RET_OK;
     EVP_CIPHER_CTX *ctx = NULL;
     size_t processed_size = 0;
-    size_t total_size = data_size;
+    size_t total_size = data_size - AES_GCM_TAG_LEN;
 
     if(!(ctx = EVP_CIPHER_CTX_new())) {
         XLOG_E("EVP_CIPHER_CTX_new failed. error: %s", ERR_reason_error_string(ERR_get_error()));
@@ -165,7 +224,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
         size_t to_read = xMIN(remaining_size, stream_count);
         size_t read_bytes = fread(inbuf, 1, to_read, in_fp);
 
-        XLOG_D("Decrypting... %zu/%zu bytes processed (%f %%).",
+        XLOG_T("Decrypting... %zu/%zu bytes processed (%f %%).",
                processed_size + read_bytes, total_size, ((double)(processed_size + read_bytes) / total_size) * 100.0);
         if (read_bytes != to_read) {
             XLOG_E("Failed to read encrypted data. Expected %zu bytes, got %zu bytes.", to_read, read_bytes);
@@ -232,6 +291,64 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
     free(inbuf);
     free(outbuf);
     EVP_CIPHER_CTX_free(ctx);
+
+    return err;
+}
+
+
+static err_t verify_rsa_signature(FILE *in,
+                                  size_t size,
+                                  const uint8_t *signature,
+                                  size_t signature_size,
+                                  const char *public_key_pem_path)
+{
+    EVP_PKEY *pubkey = NULL;
+    EVP_MD_CTX *ctx = NULL;
+    FILE *fp = NULL;
+    unsigned char buf[stream_count];
+    size_t n = 0;
+    size_t read_bytes = 0;
+    err_t err = X_RET_OK;
+
+    FILE *public_key_file = os_file_open(public_key_pem_path, "rb");
+    if (!public_key_file) goto end;
+
+    fp = os_file_open(public_key_pem_path, "rb");
+    pubkey = PEM_read_PUBKEY(fp, NULL, NULL, NULL);
+    if (!pubkey) goto end;
+    fclose(fp); fp = NULL;
+
+    ctx = EVP_MD_CTX_new();
+    if (!ctx) goto end;
+
+    if (EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, pubkey) != 1)
+        goto end;
+
+    while (read_bytes < size) {
+        size_t remaining_size = size - read_bytes;
+        n = fread(buf, 1, xMIN(remaining_size, sizeof(buf)), in);
+        if (n == 0) break;
+        if (EVP_DigestVerifyUpdate(ctx, buf, n) != 1)
+            goto end;
+
+        read_bytes += n;
+    }
+
+    int ret = EVP_DigestVerifyFinal(ctx, signature, signature_size);
+
+    if (ret == 1) err = X_RET_OK; // Signature is valid
+    else if (ret == 0) {
+        XLOG_E("Signature verification failed: invalid signature.");
+        err = X_RET_ERROR; // Invalid signature
+    } else {
+        XLOG_E("Signature verification error: %s", ERR_reason_error_string(ERR_get_error()));
+        err = X_RET_ERROR; // Some other error
+    }
+
+
+end:
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pubkey);
 
     return err;
 }

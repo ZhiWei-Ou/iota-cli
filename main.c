@@ -12,7 +12,8 @@
 #include "checkout.h"
 #include "update.h"
 
-xbool_t verbose = xFALSE;
+xbool_t log_trace = xFALSE;
+xbool_t log_debug = xFALSE;
 static void show_version(xoptions context, void* user_data);
 
 char *checkout_script = NULL;
@@ -21,6 +22,8 @@ xbool_t checkout_reboot = xFALSE;
 char *update_image = NULL;
 xbool_t update_skip_auth_tag = xFALSE;
 xbool_t update_reboot = xFALSE;
+xbool_t update_skip_verify = xFALSE;
+char *update_public_key_pem = NULL;
 int stream_count = 4096;
 
 int (*feature_entry)() = NULL;
@@ -29,8 +32,9 @@ static void use_update_feature(xoptions context);
 
 int main(int argc, char** argv){
     xoptions opts = xoptions_create_root();
-    xoptions_add_boolean(opts, 'V', "verbose", "Enable verbose output.", &verbose);
-    xoptions_add_action(opts, 'v', "version", "Show version information.", show_version, NULL);
+    xoptions_add_boolean(opts, 'v', "trace", "Enable trace logging", &log_trace);
+    xoptions_add_boolean(opts, 'D', "debug", "Enable debug logging", &log_debug);
+    xoptions_add_action(opts, 'V', "version", "Show version information.", show_version, NULL);
 
     xoptions checkout = xoptions_create_subcommand(opts, "checkout", "Checkout to another partition.");
     xoptions_set_posthook(checkout, use_checkout_feature);
@@ -42,7 +46,9 @@ int main(int argc, char** argv){
     xoptions_add_string(update, 'i', "image", "<image.iota>", "The image file to update.", &update_image, xTRUE);
     xoptions_add_boolean(update, '\0', "reboot", "Reboot after update.", &update_reboot);
     xoptions_add_boolean(update, '\0', "skip-auth", "Skip auth tag.", &update_skip_auth_tag);
+    xoptions_add_boolean(update, '\0', "skip-verify", "Skip signature verification.", &update_skip_verify);
     xoptions_add_number(update, 's', "stream-count", "<count>", "The stream count for updating process.", &stream_count, xFALSE);
+    xoptions_add_string(update, '\0', "verify", "<public_key.pem>", "The public key PEM file for signature verification.", &update_public_key_pem, xFALSE);
 
     err_t parse_err = xoptions_parse(opts, argc, argv);
     xoptions_destroy(opts);
@@ -51,8 +57,12 @@ int main(int argc, char** argv){
         return parse_err;
     }
 
-    if (verbose) {
+    if (log_debug) {
         xlog_global_set_lvl(XLOG_LVL_DEBUG);
+    }
+
+    if (log_trace) {
+        xlog_global_set_lvl(XLOG_LVL_TRACE);
     }
 
     if (feature_entry) {
