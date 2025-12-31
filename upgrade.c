@@ -1,4 +1,5 @@
 #define XLOG_MOD "upgrade"
+#include "main.h"
 #include "exec.h"
 #include "upgrade.h"
 #include "os_file.h"
@@ -20,13 +21,13 @@
 const uint8_t magic[] = { 'I', 'O', 'T', 'A' };
 const uint8_t key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 0X89, 0XC4, 0X71, 0XDC, 0X7F, 0X5C, 0X13, 0X34, 0XCD};
 
-extern char *upgrade_image;
-extern xbool_t upgrade_skip_auth_tag;
-extern xbool_t upgrade_reboot;
-extern xbool_t upgrade_skip_verify;
-extern char *upgrade_public_key_pem;
-extern xbool_t upgrade_in_place;
-extern int upgrade_stream_count;
+static char *upgrade_image = NULL;
+static xbool_t upgrade_skip_auth_tag = xFALSE;
+static xbool_t upgrade_reboot = xFALSE;
+static xbool_t upgrade_skip_verify = xFALSE;
+static xbool_t upgrade_in_place = xFALSE;
+static char *upgrade_public_key_pem = NULL;
+static int upgrade_stream_count = 4096;
 
 #pragma pack(push, 1)
 typedef struct {
@@ -37,6 +38,28 @@ typedef struct {
     uint8_t reserved[12];
 } image_header_t;
 #pragma pack(pop)
+
+
+static int upgrade_feature_entry();
+static void use_upgrade_feature(xoptions context)
+{ register_feature_function(upgrade_feature_entry); }
+
+err_t upgrade_usage_init(xoptions root) {
+    if (!root)
+        return X_RET_INVAL;
+
+    xoptions upgrade = xoptions_create_subcommand(root, "upgrade", "Upgrade iota to the latest version.");
+    xoptions_set_posthook(upgrade, use_upgrade_feature);
+    xoptions_add_string(upgrade, 'i', "image", "<firmware.iota>", "The image file to update", &upgrade_image, xTRUE);
+    xoptions_add_boolean(upgrade, '\0', "reboot", "Reboot after update", &upgrade_reboot);
+    xoptions_add_boolean(upgrade, '\0', "skip-auth", "Skip auth tag", &upgrade_skip_auth_tag);
+    xoptions_add_boolean(upgrade, '\0', "skip-verify", "Skip signature verification", &upgrade_skip_verify);
+    xoptions_add_number(upgrade, 's', "stream-count", "<count>", "The stream count for updating process", &upgrade_stream_count, xFALSE);
+    xoptions_add_string(upgrade, '\0', "verify", "<public_key.pem>", "The public key PEM file for signature verification", &upgrade_public_key_pem, xFALSE);
+    xoptions_add_boolean(upgrade, '\0', "in-place", "Perform in-place update", &upgrade_in_place);
+
+    return X_RET_OK;
+}
 
 static err_t stream_decrypt_gcm(FILE *in_fp,
                                 FILE *out_fp,

@@ -1,4 +1,6 @@
 #define XLOG_MOD "checkout"
+#include "main.h"
+#include "checkout.h"
 #include "os_thread.h"
 #include "os_file.h"
 #include "xlog.h"
@@ -7,8 +9,26 @@
 #include <stdio.h>
 #include <string.h>
 
-extern char *checkout_script;
-extern xbool_t checkout_reboot;
+#define UBOOTENV_VAR_ROOTFS_PART "rootfs_part"
+#define UBOOTENV_VAR_ROOTFS_AVAIL_PARTS "rootfs_avail_parts"
+
+static char *checkout_script = NULL;
+static xbool_t checkout_reboot = xFALSE;
+static int checkout_feature_entry();
+static void use_checkout_feature(xoptions context)
+{  register_feature_function(checkout_feature_entry);  }
+
+err_t checkout_usage_init(xoptions root) {
+    if (!root)
+        return X_RET_INVAL;
+
+    xoptions checkout = xoptions_create_subcommand(root, "checkout", "Checkout to another partition.");
+    xoptions_set_posthook(checkout, use_checkout_feature);
+    xoptions_add_string(checkout, 'x', "script", "<script.sh>", "The script to execute before checkout", &checkout_script, xFALSE);
+    xoptions_add_boolean(checkout, '\0', "reboot", "Reboot after checkout", &checkout_reboot); 
+
+    return X_RET_OK;
+}
 
 static void assert_command(const char *cmd) {
 #ifdef __APPLE__
@@ -36,6 +56,10 @@ void assert_requirements() {
 static void run_script_with_check(const char *script) {
     if (!checkout_script)
         return;
+
+    XLOG_I("Running checkout script: %s", script);
+
+    XLOG_D("Checking and running script: %s", script);
 
     if (script == NULL || strlen(script) == 0) {
         XLOG_W("No script or empty provided to run.");
@@ -73,7 +97,7 @@ static void reboot_with_check() {
 }
 
 int checkout(const char *part) {
-    xstring cmd = xstring_init_format("fw_setenv rootfs_root %s", part);
+    xstring cmd = xstring_init_format("fw_setenv %s %s", UBOOTENV_VAR_ROOTFS_PART, part);
     exec_t r = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
 
@@ -86,6 +110,8 @@ int checkout(const char *part) {
     exec_free(r);
 
     XLOG_D("Checked out to partition: '%s'", part);
+
+    XLOG_I("Partition switching successful");
 
     run_script_with_check(checkout_script);
 
@@ -112,7 +138,7 @@ int checkout_feature_entry() {
 #endif
 
     // Get current rootfs_part
-    exec_t current_part = exec_command("fw_printenv -n rootfs_part");
+    exec_t current_part = exec_command("fw_printenv -n " UBOOTENV_VAR_ROOTFS_PART);
     if (!exec_success(current_part)) {
         XLOG_E("Failed to get current rootfs_root. output: %s", exec_output(current_part));
         exec_free(current_part);

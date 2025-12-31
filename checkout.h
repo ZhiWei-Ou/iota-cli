@@ -19,7 +19,9 @@
 extern "C" {
 #endif /* __cplusplus */
 
-int checkout_feature_entry();
+#include "xoptions.h"
+
+err_t checkout_usage_init(xoptions root);
 
 #ifdef __cplusplus
 }

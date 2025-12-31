@@ -12,7 +12,9 @@
 extern "C" {
 #endif /* __cplusplus */
 
-int upgrade_feature_entry();
+#include "xoptions.h"
+
+err_t upgrade_usage_init(xoptions root);
 
 #ifdef __cplusplus
 }
