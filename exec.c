@@ -1,10 +1,4 @@
-/**
- * @brief exec 
- * @file exec.h
- * @author Oswin
- * @date 2025-12-26
- * @details
- */
+#define XLOG_MOD "exec"
 #include <stdio.h>
 #include <stdlib.h>
 #include "exec.h"
@@ -19,15 +13,15 @@ exec_t exec_command(const char *command) {
     }
 
     if (!strncmp(command, "reboot", strlen("reboot"))) {
-        XLOG_W("Simulating reboot command on macOS.");
+        XLOG_T("Simulating reboot command on macOS.");
         // exit(0);
     } else if (!strncmp(command, "fw_setenv", strlen("fw_setenv"))) {
-        XLOG_D("Simulating %s command on macOS.", command);
-    } else if (!strcmp(command, "fw_printenv rootfs_root")) {
-        XLOG_D("Simulating fw_printenv command on macOS.");
-        return (exec_t){0, xstring_init_format("rootfs_root=ubi0:rootfs_a\n")};
+        XLOG_T("Simulating %s command on macOS.", command);
+    } else if (!strcmp(command, "fw_printenv -n rootfs_part")) {
+        XLOG_T("Simulating fw_printenv command on macOS.");
+        return (exec_t){0, xstring_init_format("a\n")};
     } else {
-        XLOG_W("Simulating Run %s", command);
+        XLOG_T("Simulating Run `%s`", command);
     }
 
     return result;

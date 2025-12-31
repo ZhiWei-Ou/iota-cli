@@ -553,7 +553,7 @@ void xlog_default_output(xlogger lgr,
   };
 
   fprintf(stderr,
-          "%s[%d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s[%s:%d] %s\x1b[0m\n",
+          "%s[%d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s[%s] %s\x1b[0m\n",
           lvl_color[msg->lvl],
           tm.tm_year + 1900,
           tm.tm_mon + 1,
@@ -564,8 +564,7 @@ void xlog_default_output(xlogger lgr,
           ms,
           xlog_lvl_str(msg->lvl),
           lvl_color[msg->lvl],
-          xlog_message_file(msg),
-          xlog_message_line(msg),
+          xlog_message_module(msg),
           xlog_message_data(msg));
 }
 

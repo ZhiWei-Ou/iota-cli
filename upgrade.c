@@ -1,16 +1,16 @@
-/**
- * @brief 
- * @file update.c
- * @author Oswin
- * @date 2025-12-26
- * @details
- */
+#define XLOG_MOD "upgrade"
+#include "exec.h"
+#include "upgrade.h"
 #include "os_file.h"
 #include "xlog.h"
 #include <string.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
+
+#define TEMPORARY_TARGZ_PATH "/tmp/upgrade_firmware.tar.gz"
+#define FIRMWARE_EXTRACTED_DIR "/tmp/firmware_extracted"
+#define INACTIVE_PARTITION_MOUNT_POINT "/mnt/inactive_partition"
 
 #define AES_GCM_KEY_LEN  ( 16 )
 #define AES_GCM_IV_LEN  ( 12 )
@@ -20,12 +20,13 @@
 const uint8_t magic[] = { 'I', 'O', 'T', 'A' };
 const uint8_t key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 0X89, 0XC4, 0X71, 0XDC, 0X7F, 0X5C, 0X13, 0X34, 0XCD};
 
-extern char *update_image;
-extern xbool_t update_skip_auth_tag;
-extern xbool_t update_reboot;
-extern xbool_t update_skip_verify;
-extern char *update_public_key_pem;
-extern int stream_count;
+extern char *upgrade_image;
+extern xbool_t upgrade_skip_auth_tag;
+extern xbool_t upgrade_reboot;
+extern xbool_t upgrade_skip_verify;
+extern char *upgrade_public_key_pem;
+extern xbool_t upgrade_in_place;
+extern int upgrade_stream_count;
 
 #pragma pack(push, 1)
 typedef struct {
@@ -36,8 +37,6 @@ typedef struct {
     uint8_t reserved[12];
 } image_header_t;
 #pragma pack(pop)
-
-// const size_t header_offset =sizeof(image_header_t);
 
 static err_t stream_decrypt_gcm(FILE *in_fp,
                                 FILE *out_fp,
@@ -54,20 +53,25 @@ static err_t verify_rsa_signature(FILE *in,
                                   size_t signature_size,
                                   const char *public_key_pem_path);
 
-int update_feature_entry() {
-    if (!update_image) {
+static err_t unpack_firmware_package(const char *tar_gz_path, const char *output_dir);
+static err_t install_firmware(const char *firmware_dir);
+static err_t mount_inactive_partition();
+static err_t unmount_inactive_partition();
+
+int upgrade_feature_entry() {
+    if (!upgrade_image) {
         XLOG_E("No update image specified.");
         return X_RET_INVAL;
     }
 
-    XLOG_I("Starting update, firmware package: '%s', verification public key file: '%s'",
-           update_image, update_public_key_pem ? update_public_key_pem : "(none)");
+    XLOG_I("Starting upgrade, firmware package: '%s', verification public key file: '%s'",
+           upgrade_image, upgrade_public_key_pem ? upgrade_public_key_pem : "(none)");
 
-    XLOG_I("Stream decryption signature verification, single stream %d bytes", stream_count);
+    XLOG_I("Stream decryption signature verification, single stream %d bytes", upgrade_stream_count);
 
-    FILE *in = os_file_open(update_image, "rb");
+    FILE *in = os_file_open(upgrade_image, "rb");
     if (!in) {
-        XLOG_E("Failed to open update image: %s", update_image);
+        XLOG_E("Failed to open update image: %s", upgrade_image);
         return X_RET_ERROR;
     }
 
@@ -84,11 +88,20 @@ int update_feature_entry() {
         return X_RET_ERROR;
     }
 
+    XLOG_D("Firmware header:");
+    XLOG_D(" Magic: %c%c%c%c", header.magic[0], header.magic[1], header.magic[2], header.magic[3]);
+    XLOG_D(" Datetime: %.*s", (int)sizeof(header.datetime), header.datetime);
+    XLOG_D(" Size: %u", header.size);
+    XLOG_D(" IV: %x%x%x%x%x%x%x%x%x%x%x%x", 
+           header.iv[0], header.iv[1], header.iv[2], header.iv[3],
+           header.iv[4], header.iv[5], header.iv[6], header.iv[7],
+           header.iv[8], header.iv[9], header.iv[10], header.iv[11]);
+
     // Read IOTA AES-GCM tag
     fseek(in, sizeof(image_header_t) + header.size - AES_GCM_TAG_LEN, SEEK_SET);
     size_t tag_read_size = fread(tag, 1, sizeof(tag), in);
     if (tag_read_size != sizeof(tag)) {
-        XLOG_E("Failed to read image tag.");
+        XLOG_E("Failed to read firmware tag.");
         os_file_close(in);
         return X_RET_ERROR;
     }
@@ -98,55 +111,52 @@ int update_feature_entry() {
     fseek(in, -RSA_SIGNATURE_LEN, SEEK_END);
     size_t sig_read_size = fread(signature, 1, sizeof(signature), in);
     if (sig_read_size != sizeof(signature)) {
-        XLOG_E("Failed to read image signature.");
+        XLOG_E("Failed to read firmware signature.");
         os_file_close(in);
         return X_RET_ERROR;
     }
     // XLOG_HEX_DUMP("Image signature:", signature, sizeof(signature));
 
+    XLOG_I("Checking firmware magic");
     // Validate magic
     if (memcmp(header.magic, magic, sizeof(magic)) != 0) {
-        XLOG_E("Invalid image magic.");
+        XLOG_E("Invalid firmware magic.");
         os_file_close(in);
         return X_RET_BADFMT;
     }
 
     // Verify signature
-    if (!update_skip_verify) {
-        if (update_public_key_pem == NULL) {
+    if (!upgrade_skip_verify) {
+        if (upgrade_public_key_pem == NULL) {
             XLOG_E("No public key PEM file specified for signature verification.");
             os_file_close(in);
             return X_RET_INVAL;
         }
 
-        XLOG_I("Verifying image signature...");
+        XLOG_I("Verifying image signature");
 
         fseek(in, 0, SEEK_SET); // Seek back to the beginning for signature verification
         err = verify_rsa_signature(in,
                                    sizeof(image_header_t) + header.size,
                                    signature,
                                    sizeof(signature),
-                                   update_public_key_pem);
+                                   upgrade_public_key_pem);
 
         if (err != X_RET_OK) {
-            XLOG_E("Image signature verification failed.");
+            XLOG_E("Image signature verification failed");
             os_file_close(in);
             return err;
         }
 
-        XLOG_I("Image signature verified successfully.");
+        XLOG_I("Verify OK. firmware signature is valid");
     } else {
-        XLOG_W("Skipping image signature verification as per user request.");
+        XLOG_W("Skipping image signature verification as per user request");
     }
 
-    XLOG_D("Image datetime: %.20s", header.datetime);
-    XLOG_D("Image size: %u bytes", header.size);
-    XLOG_D("Image signature: (not displayed)");
-    XLOG_I("Image header read successfully.");
-
+    XLOG_I("Decrypting firmware package");
     // Seek to the start of encrypted data
     fseek(in, sizeof(image_header_t), SEEK_SET);
-    FILE *out = os_file_open("firmware", "wb");
+    FILE *out = os_file_open(TEMPORARY_TARGZ_PATH, "wb");
     if (!out) {
         XLOG_E("Failed to open output firmware file.");
         os_file_close(in);
@@ -159,18 +169,52 @@ int update_feature_entry() {
                              header.iv,
                              (size_t)header.size,
                              tag,
-                             stream_count,
-                             update_skip_auth_tag);
+                             upgrade_stream_count,
+                             upgrade_skip_auth_tag);
     if (err != X_RET_OK) {
         os_file_close(in);
         os_file_close(out);
         return err;
     }
 
+    XLOG_I("Firmware package decrypted successfully");
+
     os_file_close(out);
     os_file_close(in);
 
-    return X_RET_OK;
+    if (upgrade_in_place) {
+        XLOG_I("Performing In-Place update mode");
+        XLOG_I("Skip mounting inactive partition");
+    } else {
+        XLOG_I("Performing Standard update mode");
+        err = mount_inactive_partition();
+        if (err != X_RET_OK) {
+            XLOG_E("Failed to mount inactive partition");
+            goto exit;
+        }
+    }
+
+    XLOG_I("Unpacking firmware package");
+    err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, FIRMWARE_EXTRACTED_DIR);
+    if (err != X_RET_OK) {
+        XLOG_E("Failed to unpack firmware package");
+        goto exit;
+    }
+
+    XLOG_I("Installing firmware");
+    err = install_firmware(FIRMWARE_EXTRACTED_DIR);
+    if (err != X_RET_OK) {
+        XLOG_E("Failed to install firmware");
+        goto exit;
+    }
+
+    XLOG_I("Firmware upgrade completed successfully");
+
+exit:
+    if (!upgrade_in_place) {
+        unmount_inactive_partition();
+    }
+    return err;
 }
 
 static err_t stream_decrypt_gcm(FILE *in_fp,
@@ -278,7 +322,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
             if (len > 0) {
                 fwrite(outbuf, 1, len, out_fp);
             }
-            XLOG_I("Decrypted %ld bytes successfully.", processed_size);
+            XLOG_I("Decrypted %ld bytes successfully", processed_size);
             err = X_RET_OK; // Success for main return
         } else {
             /* Verify failed */
@@ -305,7 +349,7 @@ static err_t verify_rsa_signature(FILE *in,
     EVP_PKEY *pubkey = NULL;
     EVP_MD_CTX *ctx = NULL;
     FILE *fp = NULL;
-    unsigned char buf[stream_count];
+    unsigned char buf[upgrade_stream_count];
     size_t n = 0;
     size_t read_bytes = 0;
     err_t err = X_RET_OK;
@@ -317,6 +361,8 @@ static err_t verify_rsa_signature(FILE *in,
     pubkey = PEM_read_PUBKEY(fp, NULL, NULL, NULL);
     if (!pubkey) goto end;
     fclose(fp); fp = NULL;
+
+    XLOG_D("Loaded public key (PEM) from %s, not displaying for security reasons.", public_key_pem_path);
 
     ctx = EVP_MD_CTX_new();
     if (!ctx) goto end;
@@ -331,13 +377,19 @@ static err_t verify_rsa_signature(FILE *in,
         if (EVP_DigestVerifyUpdate(ctx, buf, n) != 1)
             goto end;
 
+        XLOG_T("Calculating... %zu/%zu bytes processed (%f %%).",
+               read_bytes + n, size, ((double)(read_bytes + n) / size) * 100.0);
+
         read_bytes += n;
     }
 
+    XLOG_D("Finalizing signature verification");
     int ret = EVP_DigestVerifyFinal(ctx, signature, signature_size);
 
-    if (ret == 1) err = X_RET_OK; // Signature is valid
-    else if (ret == 0) {
+    if (ret == 1) {
+        XLOG_D("Verification successful: signature is valid.");
+        err = X_RET_OK; // Signature is valid
+    } else if (ret == 0) {
         XLOG_E("Signature verification failed: invalid signature.");
         err = X_RET_ERROR; // Invalid signature
     } else {
@@ -351,4 +403,46 @@ end:
     EVP_PKEY_free(pubkey);
 
     return err;
+}
+
+static err_t unpack_firmware_package(const char *tar_gz_path, const char *output_dir) {
+    if (!os_file_exist(tar_gz_path)) {
+        XLOG_E("Firmware package file does not exist: %s", tar_gz_path);
+        return X_RET_NOTENT;
+    }
+
+    xstring cmd = xstring_init_format("tar -xzf %s -C %s", tar_gz_path, output_dir);
+    exec_t output = exec_command(xstring_to_string(&cmd));
+    xstring_free(&cmd);
+
+    if (!exec_success(output)) {
+        XLOG_E("Failed to unpack firmware package");
+        exec_free(output);
+        return X_RET_ERROR;
+    }
+
+    return X_RET_OK;
+}
+static err_t install_firmware(const char *firmware_dir) {
+    xstring cmd = xstring_init_format("cp -r %s/* %s", firmware_dir,
+                                      upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
+    exec_t output = exec_command(xstring_to_string(&cmd));
+    xstring_free(&cmd);
+
+    if (!exec_success(output)) {
+        XLOG_E("Failed to install firmware");
+        exec_free(output);
+        return X_RET_ERROR;
+    }
+
+    exec_free(output);
+    return X_RET_OK;
+}
+static err_t mount_inactive_partition() {
+    XLOG_D("Mounting inactive partition at %s", INACTIVE_PARTITION_MOUNT_POINT);
+    return X_RET_OK;
+}
+static err_t unmount_inactive_partition() {
+    XLOG_D("Unmounting inactive partition from %s", INACTIVE_PARTITION_MOUNT_POINT);
+    return X_RET_OK;
 }

@@ -1,6 +1,7 @@
 /**
  * @brief 
- * @file update.h
+ *  - iota update -i <firmware.iota> [--skip-auth] [--verify <public_key.pem>] [--in-place] [--reboot]
+ * @file upgrade.h
  * @author Oswin
  * @date 2025-12-26
  * @details
@@ -11,7 +12,7 @@
 extern "C" {
 #endif /* __cplusplus */
 
-int update_feature_entry();
+int upgrade_feature_entry();
 
 #ifdef __cplusplus
 }

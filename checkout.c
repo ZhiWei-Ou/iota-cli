@@ -1,12 +1,4 @@
-/**
- * @brief 
- * @file checkout.c
- * @author Oswin
- * @date 2025-12-26
- * @details
- *
- * @copyright (c) 2025 Oswin. All Rights Reserved.
- */
+#define XLOG_MOD "checkout"
 #include "os_thread.h"
 #include "os_file.h"
 #include "xlog.h"
@@ -34,6 +26,8 @@ static void assert_command(const char *cmd) {
 }
 
 void assert_requirements() {
+    XLOG_D("Checking requirements for checkout feature...");
+
     assert_command("fw_setenv");
     assert_command("fw_printenv");
     assert_command("reboot");
@@ -79,30 +73,19 @@ static void reboot_with_check() {
 }
 
 int checkout(const char *part) {
-    const char *another_part = NULL;
-
-    if (strncmp(part, "ubi0:rootfs_a", strlen("ubi0:rootfs_a")) == 0) {
-        another_part = "ubi0:rootfs_b";
-    } else if (strncmp(part, "ubi0:rootfs_b", strlen("ubi0:rootfs_b")) == 0) {
-        another_part = "ubi0:rootfs_a";
-    } else {
-        XLOG_E("Invalid partition: %s", part);
-        return -1;
-    }
-
-    xstring cmd = xstring_init_format("fw_setenv rootfs_root %s", another_part);
+    xstring cmd = xstring_init_format("fw_setenv rootfs_root %s", part);
     exec_t r = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
 
     if (!exec_success(r)) {
-        XLOG_E("Failed to set rootfs_root to %s.", another_part);
+        XLOG_E("Failed to set rootfs_root to '%s'", part);
         exec_free(r);
         return -1;
     }
 
     exec_free(r);
 
-    XLOG_I("Checked out to partition: %s", another_part);
+    XLOG_D("Checked out to partition: '%s'", part);
 
     run_script_with_check(checkout_script);
 
@@ -114,22 +97,54 @@ int checkout(const char *part) {
 int checkout_feature_entry() {
     assert_requirements();
 
-    char *part = NULL;
-
-    exec_t r = exec_command("fw_printenv rootfs_root");
-    if (!exec_success(r)) {
-        XLOG_E("Failed to get current rootfs_root. output: %s", exec_output(r));
-        exec_free(r);
+#if 0
+    // Get available partitions
+    exec_t avails = exec_command("fw_printenv -n rootfs_avail_parts");
+    if (!exec_success(avails)) {
+        XLOG_E("Failed to get available rootfs parts. output: %s", exec_output(avails));
+        exec_free(avails);
         return -1;
-    } else {
-        const char *token = NULL;
-        int len = xstring_tokenize_by_substr(&r.output, "rootfs_root=", &token);
-        asprintf(&part, "%.*s", len, token);
     }
-    exec_free(r);
 
-    int code = checkout(part);
-    free(part);
+    // Trim output
+    xstring_trim(&avails.output);
+    exec_free(avails);
+#endif
+
+    // Get current rootfs_part
+    exec_t current_part = exec_command("fw_printenv -n rootfs_part");
+    if (!exec_success(current_part)) {
+        XLOG_E("Failed to get current rootfs_root. output: %s", exec_output(current_part));
+        exec_free(current_part);
+        return -1;
+    }
+
+    const char *p = xstring_trim(&current_part.output);
+    if (!p || strlen(p) == 0) {
+        XLOG_E("Current rootfs_part is empty (No expect).");
+        exec_free(current_part);
+        return -1;
+    }
+
+    XLOG_D("Current partition: '%s'", p);
+
+    if (!strcmp(p, "a")) {
+        p = "b";
+    } else if (!strcmp(p, "b")) {
+        p = "a";
+    } else {
+        XLOG_E("Invalid current rootfs_part: %s", p);
+        exec_free(current_part);
+        return -1;
+    }
+
+    int code = checkout(p);
+
+    exec_free(current_part);
+
+    if (code == X_RET_OK) {
+        XLOG_I("Successfully checked out to partition: '%s'", p);
+    }
 
     return code;
 }
