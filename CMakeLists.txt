@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.10.0)
 
 set(VERSION "0.0.1")
-set(PROJECT_NAME "iotad")
+set(PROJECT_NAME "iota-cli")
 
 project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES C)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(OpenSSL REQUIRED)
 

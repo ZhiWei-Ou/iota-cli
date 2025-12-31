@@ -3,6 +3,7 @@
 #include "exec.h"
 #include "upgrade.h"
 #include "os_file.h"
+#include "checkout.h"
 #include "xlog.h"
 #include <string.h>
 #include <openssl/evp.h>
@@ -11,7 +12,6 @@
 
 #define TEMPORARY_TARGZ_PATH "/tmp/upgrade_firmware.tar.gz"
 #define FIRMWARE_EXTRACTED_DIR "/tmp/firmware_extracted"
-#define INACTIVE_PARTITION_MOUNT_POINT "/mnt/inactive_partition"
 
 #define AES_GCM_KEY_LEN  ( 16 )
 #define AES_GCM_IV_LEN  ( 12 )
@@ -21,13 +21,12 @@
 const uint8_t magic[] = { 'I', 'O', 'T', 'A' };
 const uint8_t key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 0X89, 0XC4, 0X71, 0XDC, 0X7F, 0X5C, 0X13, 0X34, 0XCD};
 
-static char *upgrade_image = NULL;
-static xbool_t upgrade_skip_auth_tag = xFALSE;
-static xbool_t upgrade_reboot = xFALSE;
-static xbool_t upgrade_skip_verify = xFALSE;
+static char *firmware_path = NULL;
+static xbool_t skip_firmware_auth = xFALSE;
+static xbool_t skip_firmware_verify = xFALSE;
 static xbool_t upgrade_in_place = xFALSE;
-static char *upgrade_public_key_pem = NULL;
-static int upgrade_stream_count = 4096;
+static char *key_path = NULL;
+static int stream_count = 4096;
 
 #pragma pack(push, 1)
 typedef struct {
@@ -39,7 +38,6 @@ typedef struct {
 } image_header_t;
 #pragma pack(pop)
 
-
 static int upgrade_feature_entry();
 static void use_upgrade_feature(xoptions context)
 { register_feature_function(upgrade_feature_entry); }
@@ -48,15 +46,14 @@ err_t upgrade_usage_init(xoptions root) {
     if (!root)
         return X_RET_INVAL;
 
-    xoptions upgrade = xoptions_create_subcommand(root, "upgrade", "Upgrade iota to the latest version.");
+    xoptions upgrade = xoptions_create_subcommand(root, "upgrade", "Perform a system firmware upgrade.");
     xoptions_set_posthook(upgrade, use_upgrade_feature);
-    xoptions_add_string(upgrade, 'i', "image", "<firmware.iota>", "The image file to update", &upgrade_image, xTRUE);
-    xoptions_add_boolean(upgrade, '\0', "reboot", "Reboot after update", &upgrade_reboot);
-    xoptions_add_boolean(upgrade, '\0', "skip-auth", "Skip auth tag", &upgrade_skip_auth_tag);
-    xoptions_add_boolean(upgrade, '\0', "skip-verify", "Skip signature verification", &upgrade_skip_verify);
-    xoptions_add_number(upgrade, 's', "stream-count", "<count>", "The stream count for updating process", &upgrade_stream_count, xFALSE);
-    xoptions_add_string(upgrade, '\0', "verify", "<public_key.pem>", "The public key PEM file for signature verification", &upgrade_public_key_pem, xFALSE);
-    xoptions_add_boolean(upgrade, '\0', "in-place", "Perform in-place update", &upgrade_in_place);
+    xoptions_add_string(upgrade, 'i', "image", "<firmware.iota>", "Path to the firmware image file (.iota)", &firmware_path, xTRUE);
+    xoptions_add_boolean(upgrade, '\0', "skip-auth", "Bypass authentication tag validation (insecure)", &skip_firmware_auth);
+    xoptions_add_boolean(upgrade, '\0', "skip-verify", "Bypass digital signature verification (insecure)", &skip_firmware_verify);
+    xoptions_add_number(upgrade, 's', "stream-count", "<count>", "Number of bytes per data chunk for streaming decryption and verification", &stream_count, xFALSE);
+    xoptions_add_string(upgrade, '\0', "verify", "<public_key.pem>", "Path to the public key PEM file for signature validation", &key_path, xFALSE);
+    xoptions_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
 
     return X_RET_OK;
 }
@@ -78,23 +75,22 @@ static err_t verify_rsa_signature(FILE *in,
 
 static err_t unpack_firmware_package(const char *tar_gz_path, const char *output_dir);
 static err_t install_firmware(const char *firmware_dir);
-static err_t mount_inactive_partition();
-static err_t unmount_inactive_partition();
+static err_t cleanup_temporary_resources();
 
 int upgrade_feature_entry() {
-    if (!upgrade_image) {
+    if (!firmware_path) {
         XLOG_E("No update image specified.");
         return X_RET_INVAL;
     }
 
     XLOG_I("Starting upgrade, firmware package: '%s', verification public key file: '%s'",
-           upgrade_image, upgrade_public_key_pem ? upgrade_public_key_pem : "(none)");
+           firmware_path, key_path ? key_path : "(none)");
 
-    XLOG_I("Stream decryption signature verification, single stream %d bytes", upgrade_stream_count);
+    XLOG_I("Stream decryption signature verification, single stream %d bytes", stream_count);
 
-    FILE *in = os_file_open(upgrade_image, "rb");
+    FILE *in = os_file_open(firmware_path, "rb");
     if (!in) {
-        XLOG_E("Failed to open update image: %s", upgrade_image);
+        XLOG_E("Failed to open update image: %s", firmware_path);
         return X_RET_ERROR;
     }
 
@@ -149,8 +145,8 @@ int upgrade_feature_entry() {
     }
 
     // Verify signature
-    if (!upgrade_skip_verify) {
-        if (upgrade_public_key_pem == NULL) {
+    if (!skip_firmware_verify) {
+        if (key_path == NULL) {
             XLOG_E("No public key PEM file specified for signature verification.");
             os_file_close(in);
             return X_RET_INVAL;
@@ -163,7 +159,7 @@ int upgrade_feature_entry() {
                                    sizeof(image_header_t) + header.size,
                                    signature,
                                    sizeof(signature),
-                                   upgrade_public_key_pem);
+                                   key_path);
 
         if (err != X_RET_OK) {
             XLOG_E("Image signature verification failed");
@@ -192,8 +188,8 @@ int upgrade_feature_entry() {
                              header.iv,
                              (size_t)header.size,
                              tag,
-                             upgrade_stream_count,
-                             upgrade_skip_auth_tag);
+                             stream_count,
+                             skip_firmware_auth);
     if (err != X_RET_OK) {
         os_file_close(in);
         os_file_close(out);
@@ -234,9 +230,10 @@ int upgrade_feature_entry() {
     XLOG_I("Firmware upgrade completed successfully");
 
 exit:
-    if (!upgrade_in_place) {
-        unmount_inactive_partition();
-    }
+    if (!upgrade_in_place) unmount_inactive_partition();
+
+    cleanup_temporary_resources();
+
     return err;
 }
 
@@ -372,7 +369,7 @@ static err_t verify_rsa_signature(FILE *in,
     EVP_PKEY *pubkey = NULL;
     EVP_MD_CTX *ctx = NULL;
     FILE *fp = NULL;
-    unsigned char buf[upgrade_stream_count];
+    unsigned char buf[stream_count];
     size_t n = 0;
     size_t read_bytes = 0;
     err_t err = X_RET_OK;
@@ -434,7 +431,7 @@ static err_t unpack_firmware_package(const char *tar_gz_path, const char *output
         return X_RET_NOTENT;
     }
 
-    xstring cmd = xstring_init_format("tar -xzf %s -C %s", tar_gz_path, output_dir);
+    xstring cmd = xstring_init_format("mkdir -p %s; tar --warning=none -xzf %s -C %s", output_dir, tar_gz_path, output_dir);
     exec_t output = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
 
@@ -446,6 +443,7 @@ static err_t unpack_firmware_package(const char *tar_gz_path, const char *output
 
     return X_RET_OK;
 }
+
 static err_t install_firmware(const char *firmware_dir) {
     xstring cmd = xstring_init_format("cp -r %s/* %s", firmware_dir,
                                       upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
@@ -461,11 +459,15 @@ static err_t install_firmware(const char *firmware_dir) {
     exec_free(output);
     return X_RET_OK;
 }
-static err_t mount_inactive_partition() {
-    XLOG_D("Mounting inactive partition at %s", INACTIVE_PARTITION_MOUNT_POINT);
+
+static err_t cleanup_temporary_resources() {
+    XLOG_D("Cleaning up temporary resources");
+
+    xstring cmd = xstring_init_format("rm -rf %s %s", FIRMWARE_EXTRACTED_DIR, TEMPORARY_TARGZ_PATH);
+    exec_t output = exec_command(xstring_to_string(&cmd));
+    xstring_free(&cmd);
+    exec_free(output);
+
     return X_RET_OK;
 }
-static err_t unmount_inactive_partition() {
-    XLOG_D("Unmounting inactive partition from %s", INACTIVE_PARTITION_MOUNT_POINT);
-    return X_RET_OK;
-}
+

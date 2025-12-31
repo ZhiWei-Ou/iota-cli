@@ -5,8 +5,8 @@
  *  partition environment.
  *
  * e.g.
- *  - iota checkout
- *  - iota checkout --reboot
+ *  - iota-cli checkout
+ *  - iota-cli checkout --reboot
  *
  * @file checkout.h
  * @author Oswin
@@ -19,9 +19,19 @@
 extern "C" {
 #endif /* __cplusplus */
 
+#define UBOOTENV_VAR_ROOTFS_PART "rootfs_part"
+#define UBOOTENV_VAR_ROOTFS_AVAIL_PARTS "rootfs_avail_parts"
+#define INACTIVE_PARTITION_MOUNT_POINT "/mnt/inactive_partition"
+
+#include "xstring.h"
 #include "xoptions.h"
 
 err_t checkout_usage_init(xoptions root);
+
+xstring get_inactive_partition(void);
+xstring get_active_partition(void);
+err_t mount_inactive_partition(void);
+err_t unmount_inactive_partition(void);
 
 #ifdef __cplusplus
 }
