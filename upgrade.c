@@ -431,7 +431,17 @@ static err_t unpack_firmware_package(const char *tar_gz_path, const char *output
         return X_RET_NOTENT;
     }
 
-    xstring cmd = xstring_init_format("mkdir -p %s; tar --warning=none -xzf %s -C %s", output_dir, tar_gz_path, output_dir);
+    xstring cmd = xstring_init_format("mkdir -p %s;"
+                                      "tar --warning=none "
+                                      "--exclude=proc "
+                                      "--exclude=sys "
+                                      "--exclude=dev "
+                                      "--exclude=run "
+                                      "--exclude=tmp "
+                                      "--exclude=mnt "
+                                      "--exclude=media "
+                                      "-xzpf %s  -C %s",
+                                      output_dir, tar_gz_path, output_dir);
     exec_t output = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
 
