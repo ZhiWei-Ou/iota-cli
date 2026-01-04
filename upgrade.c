@@ -213,6 +213,7 @@ int upgrade_feature_entry() {
         }
     }
 
+#if 0
     XLOG_I("Unpacking firmware package");
     err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, FIRMWARE_EXTRACTED_DIR);
     if (err != X_RET_OK) {
@@ -226,6 +227,14 @@ int upgrade_feature_entry() {
         XLOG_E("Failed to install firmware");
         goto exit;
     }
+#else
+    XLOG_I("Unpacking and installing firmware package");
+    err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
+    if (err != X_RET_OK) {
+        XLOG_E("Failed to unpack firmware package");
+        goto exit;
+    }
+#endif
 
     XLOG_I("Firmware upgrade completed successfully");
 
