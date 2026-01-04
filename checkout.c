@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 static char *specified_script = NULL;
+static xbool_t force = xFALSE;
 static xbool_t need_reboot = xFALSE;
 static int reboot_delay_second = 3;
 static int checkout_feature_entry();
@@ -25,6 +26,7 @@ err_t checkout_usage_init(xoptions root) {
     xoptions_add_string(checkout, 'x', "script", "<script.sh>", "Custom shell script to run after the partition switch", &specified_script, xFALSE);
     xoptions_add_boolean(checkout, '\0', "reboot", "Automatically restart the system after a successful checkout", &need_reboot); 
     xoptions_add_number(checkout, '\0', "delay", "<seconds>", "Time to wait (in seconds) before performing the reboot", &reboot_delay_second, xFALSE);
+    xoptions_add_boolean(checkout, 'f', "force", "Force the checkout even if the target partition is already active", &force);
 
     return X_RET_OK;
 }
@@ -122,54 +124,54 @@ int checkout(const char *part) {
 int checkout_feature_entry() {
     assert_requirements();
 
-#if 0
-    // Get available partitions
-    exec_t avails = exec_command("fw_printenv -n rootfs_avail_parts");
-    if (!exec_success(avails)) {
-        XLOG_E("Failed to get available rootfs parts. output: %s", exec_output(avails));
-        exec_free(avails);
+    // Get current rootfs partition from rootfs mount
+    exec_t current_rootfs_part = exec_command("awk '$2==\"/\" {print $1}' /proc/self/mounts");
+    if (!exec_success(current_rootfs_part)) {
+        XLOG_D("mount output: %s", exec_output(current_rootfs_part));
+        XLOG_E("Failed to get current rootfs mount info.");
         return -1;
     }
 
-    // Trim output
-    xstring_trim(&avails.output);
-    exec_free(avails);
-#endif
-
-    // Get current rootfs_part
-    exec_t current_part = exec_command("fw_printenv -n " UBOOTENV_VAR_ROOTFS_PART);
-    if (!exec_success(current_part)) {
-        XLOG_E("Failed to get current rootfs_root. output: %s", exec_output(current_part));
-        exec_free(current_part);
+    // Get current boot partition from U-Boot env
+    exec_t current_env_part = exec_command("fw_printenv -n " UBOOTENV_VAR_ROOTFS_PART);
+    if (!exec_success(current_env_part)) {
+        XLOG_E("Failed to get current rootfs_root. output: %s", exec_output(current_env_part));
         return -1;
     }
 
     // Remove whitespace and breaklines
-    const char *p = xstring_trim(&current_part.output);
-    if (!p || strlen(p) == 0) {
-        XLOG_E("Current rootfs_part is empty (No expect).");
-        exec_free(current_part);
-        return -1;
-    }
+    const char *env_part = xstring_trim(&current_env_part.output);
+    const char *rootfs_part = xstring_trim(&current_rootfs_part.output);
+    const char *checkout_part = NULL;
 
-    XLOG_D("Current partition: '%s'", p);
+    XLOG_D("Current rootfs source: '%s' and env partition: '%s'", rootfs_part, env_part);
 
-    if (!strcmp(p, "a")) {
-        p = "b";
-    } else if (!strcmp(p, "b")) {
-        p = "a";
+    // Determine the inactive partition
+    if (!strcmp(env_part, "a")) {
+        checkout_part = "b";
+    } else if (!strcmp(env_part, "b")) {
+        checkout_part = "a";
     } else {
-        XLOG_E("Invalid current rootfs_part: %s", p);
-        exec_free(current_part);
+        XLOG_E("Invalid current rootfs_part: %s", env_part);
+        exec_free(current_env_part);
         return -1;
     }
 
-    int code = checkout(p);
+    if ((!strcmp(checkout_part, "a") && !strcmp(rootfs_part, "ubi0:a")) ||
+        (!strcmp(checkout_part, "b") && !strcmp(rootfs_part, "ubi0:b"))) {
 
-    exec_free(current_part);
+        XLOG_W("The checkout partition '%s' is already the active partition.", checkout_part);
+
+        if (!force) {
+            XLOG_W("Skipping checkout. Use --force to override if you really want to checkout to the same partition.");
+            return X_RET_EXIST;
+        }
+    }
+
+    int code = checkout(checkout_part);
 
     if (code == X_RET_OK) {
-        XLOG_I("Successfully checked out to partition: '%s'", p);
+        XLOG_I("Successfully checked out to partition: '%s'", checkout_part);
     }
 
     return code;

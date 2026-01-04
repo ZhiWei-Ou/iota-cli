@@ -455,13 +455,12 @@ static err_t unpack_firmware_package(const char *tar_gz_path, const char *output
 }
 
 static err_t install_firmware(const char *firmware_dir) {
-    xstring cmd = xstring_init_format("cp -r %s/* %s", firmware_dir,
+    xstring cmd = xstring_init_format("cp -afr %s/* %s", firmware_dir,
                                       upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
     exec_t output = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
 
     if (!exec_success(output)) {
-        XLOG_E("Failed to install firmware");
         exec_free(output);
         return X_RET_ERROR;
     }
