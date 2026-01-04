@@ -223,6 +223,23 @@ xstring get_active_partition(void) {
     return xstring_init_iter(p);
 }
 
+static xbool_t checkout_mount_already(const char *part) {
+    if (part == NULL)
+        return xFALSE;
+
+    xstring cmd = xstring_init_format("mount | grep '%s'",
+                                      part);
+    exec_t r = exec_command(xstring_to_string(&cmd));
+    xstring_free(&cmd);
+    if (exec_success(r)) {
+        exec_free(r);
+        return xTRUE;
+    } else {
+        exec_free(r);
+        return xFALSE;
+    }
+}
+
 err_t mount_inactive_partition(void) {
     xstring inactive_part = get_inactive_partition();
     if (xstring_is_empty(&inactive_part)) {
@@ -240,6 +257,12 @@ err_t mount_inactive_partition(void) {
         XLOG_E("Invalid inactive partition: %s", xstring_to_string(&inactive_part));
         xstring_free(&inactive_part);
         return X_RET_ERROR;
+    }
+
+    // If already mounted, report error
+    if (checkout_mount_already(ubi_dev)) {
+        XLOG_W("Inactive partition already mounted. please unmount it first.");
+        return X_RET_EXIST;
     }
 
     xstring cmd = xstring_init_format("mkdir -p %s; mount -t ubifs %s %s",
@@ -281,7 +304,8 @@ err_t unmount_inactive_partition(void) {
 
     xstring_free(&inactive_part);
 
-    xstring cmd = xstring_init_format("umount %s", INACTIVE_PARTITION_MOUNT_POINT);
+    xstring cmd = xstring_init_format("umount %s && rmdir %s",
+                                      INACTIVE_PARTITION_MOUNT_POINT, INACTIVE_PARTITION_MOUNT_POINT);
     exec_t r = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
     if (!exec_success(r)) {
