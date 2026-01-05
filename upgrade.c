@@ -5,10 +5,13 @@
 #include "os_file.h"
 #include "checkout.h"
 #include "xlog.h"
+#include <time.h>
 #include <string.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
+#include <archive.h>
+#include <archive_entry.h>
 
 #define TEMPORARY_TARGZ_PATH "/tmp/upgrade_firmware.tar.gz"
 #define FIRMWARE_EXTRACTED_DIR "/tmp/firmware_extracted"
@@ -25,6 +28,7 @@ static char *firmware_path = NULL;
 static xbool_t skip_firmware_auth = xFALSE;
 static xbool_t skip_firmware_verify = xFALSE;
 static xbool_t upgrade_in_place = xFALSE;
+static xbool_t dont_print_progress = xFALSE;
 static char *key_path = NULL;
 static int stream_count = 4096;
 
@@ -38,6 +42,7 @@ typedef struct {
 } image_header_t;
 #pragma pack(pop)
 
+static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
 static int upgrade_feature_entry();
 static void use_upgrade_feature(xoptions context)
 { register_feature_function(upgrade_feature_entry); }
@@ -54,6 +59,7 @@ err_t upgrade_usage_init(xoptions root) {
     xoptions_add_number(upgrade, 's', "stream-count", "<count>", "Number of bytes per data chunk for streaming decryption and verification", &stream_count, xFALSE);
     xoptions_add_string(upgrade, '\0', "verify", "<public_key.pem>", "Path to the public key PEM file for signature validation", &key_path, xFALSE);
     xoptions_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
+    xoptions_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
 
     return X_RET_OK;
 }
@@ -98,6 +104,7 @@ int upgrade_feature_entry() {
     image_header_t header = {0};
     uint8_t tag[AES_GCM_TAG_LEN] = {0};
     uint8_t signature[RSA_SIGNATURE_LEN] = {0};
+    time_t start_time = time(NULL);
 
     // Read IOTA header
     size_t header_read_size = fread(&header, 1, sizeof(image_header_t), in);
@@ -228,15 +235,23 @@ int upgrade_feature_entry() {
         goto exit;
     }
 #else
-    XLOG_I("Unpacking and installing firmware package");
-    err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
-    if (err != X_RET_OK) {
-        XLOG_E("Failed to unpack firmware package");
-        goto exit;
+    {
+        time_t start_time = time(NULL);
+        XLOG_I("Unpacking and installing firmware package");
+        err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
+        if (err != X_RET_OK) {
+            XLOG_E("Failed to unpack firmware package");
+            goto exit;
+        }
+
+        time_t end_time = time(NULL);
+
+        XLOG_I("Firmware package unpacked and installed successfully. Total time: %jd (s).", end_time - start_time);
     }
 #endif
 
-    XLOG_I("Firmware upgrade completed successfully");
+    time_t end_time = time(NULL);
+    XLOG_I("Firmware upgrade completed successfully. Total time: %jd (s).", end_time - start_time);
 
 exit:
     if (!upgrade_in_place) unmount_inactive_partition();
@@ -262,6 +277,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
     EVP_CIPHER_CTX *ctx = NULL;
     size_t processed_size = 0;
     size_t total_size = data_size - AES_GCM_TAG_LEN;
+    time_t start_time = time(NULL);
 
     if(!(ctx = EVP_CIPHER_CTX_new())) {
         XLOG_E("EVP_CIPHER_CTX_new failed. error: %s", ERR_reason_error_string(ERR_get_error()));
@@ -296,9 +312,18 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
         size_t remaining_size = total_size - processed_size;
         size_t to_read = xMIN(remaining_size, stream_count);
         size_t read_bytes = fread(inbuf, 1, to_read, in_fp);
+        time_t current_time = time(NULL);
 
-        XLOG_T("Decrypting... %zu/%zu bytes processed (%f %%).",
-               processed_size + read_bytes, total_size, ((double)(processed_size + read_bytes) / total_size) * 100.0);
+#if 0
+        XLOG_T("Decrypting..., Elapsed: %jd (s), %zu/%zu bytes processed (%.1f %%).",
+               current_time - start_time,
+               processed_size + read_bytes,
+               total_size,
+               ((double)(processed_size + read_bytes) / total_size) * 100.0);
+#else
+        xstring postfix = xstring_init_format(" Elapsed: %jd (s)", current_time - start_time);
+        XLOG_P("Decrypting", xstring_to_string(&postfix), processed_size + read_bytes, total_size);
+#endif
         if (read_bytes != to_read) {
             XLOG_E("Failed to read encrypted data. Expected %zu bytes, got %zu bytes.", to_read, read_bytes);
             free(inbuf);
@@ -351,7 +376,9 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
             if (len > 0) {
                 fwrite(outbuf, 1, len, out_fp);
             }
-            XLOG_I("Decrypted %ld bytes successfully", processed_size);
+
+            time_t end_time = time(NULL);
+            XLOG_I("Decrypted %ld bytes successfully. Total time: %jd (s).", processed_size, end_time - start_time);
             err = X_RET_OK; // Success for main return
         } else {
             /* Verify failed */
@@ -382,6 +409,7 @@ static err_t verify_rsa_signature(FILE *in,
     size_t n = 0;
     size_t read_bytes = 0;
     err_t err = X_RET_OK;
+    time_t start_time = time(NULL);
 
     FILE *public_key_file = os_file_open(public_key_pem_path, "rb");
     if (!public_key_file) goto end;
@@ -400,14 +428,20 @@ static err_t verify_rsa_signature(FILE *in,
         goto end;
 
     while (read_bytes < size) {
+        time_t current_time = time(NULL);
         size_t remaining_size = size - read_bytes;
         n = fread(buf, 1, xMIN(remaining_size, sizeof(buf)), in);
         if (n == 0) break;
         if (EVP_DigestVerifyUpdate(ctx, buf, n) != 1)
             goto end;
 
-        XLOG_T("Calculating... %zu/%zu bytes processed (%f %%).",
-               read_bytes + n, size, ((double)(read_bytes + n) / size) * 100.0);
+#if 0
+        XLOG_T("Verifying..., Elapsed: %jd (s), %zu/%zu bytes processed (%.1f %%).",
+               current_time - start_time, read_bytes + n, size, ((double)(read_bytes + n) / size) * 100.0);
+#else
+        xstring postfix = xstring_init_format(" Elapsed: %jd (s)", current_time - start_time);
+        XLOG_P("Verifying", xstring_to_string(&postfix), read_bytes + n, size);
+#endif
 
         read_bytes += n;
     }
@@ -416,7 +450,8 @@ static err_t verify_rsa_signature(FILE *in,
     int ret = EVP_DigestVerifyFinal(ctx, signature, signature_size);
 
     if (ret == 1) {
-        XLOG_D("Verification successful: signature is valid.");
+        time_t end_time = time(NULL);
+        XLOG_D("Verification successful: signature is valid. Total time: %jd (s).", end_time - start_time);
         err = X_RET_OK; // Signature is valid
     } else if (ret == 0) {
         XLOG_E("Signature verification failed: invalid signature.");
@@ -449,8 +484,9 @@ static err_t unpack_firmware_package(const char *tar_gz_path, const char *output
                                       "--exclude=tmp "
                                       "--exclude=mnt "
                                       "--exclude=media "
+                                      "--exclude=%s " // avoid extracting to itself
                                       "-xzpf %s  -C %s",
-                                      output_dir, tar_gz_path, output_dir);
+                                      output_dir, tar_gz_path, tar_gz_path, output_dir);
     exec_t output = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
 
@@ -489,3 +525,26 @@ static err_t cleanup_temporary_resources() {
     return X_RET_OK;
 }
 
+static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total) {
+    if (dont_print_progress) return;
+
+    const int bar_width = 50;
+    float progress = (float)current / total;
+    int pos = (int)(bar_width * progress);
+    char bar[bar_width + 1];
+
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < pos) bar[i] = '=';
+        else if (i == pos) bar[i] = '>';
+        else bar[i] = ' ';
+    }
+    bar[bar_width] = '\0';
+
+    fprintf(stderr, "\033[?25l"); // hide cursor
+    if (current >= total)
+        fprintf(stderr, "\r%s [%s] 100%% , %s\n\033[?25h", prefix, bar, postfix);
+    else
+        fprintf(stderr, "\r%s [%s] %3d%% , %s", prefix, bar, (int)(progress*100), postfix);
+
+    fflush(stderr);
+}
