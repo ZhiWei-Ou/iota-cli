@@ -22,9 +22,10 @@
 #define RSA_SIGNATURE_LEN ( 256 )
 
 const uint8_t magic[] = { 'I', 'O', 'T', 'A' };
-const uint8_t key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 0X89, 0XC4, 0X71, 0XDC, 0X7F, 0X5C, 0X13, 0X34, 0XCD};
+const uint8_t default_key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 0X89, 0XC4, 0X71, 0XDC, 0X7F, 0X5C, 0X13, 0X34, 0XCD};
 
 static char *firmware_path = NULL;
+static char *hexkey = NULL;
 static xbool_t skip_firmware_auth = xFALSE;
 static xbool_t skip_firmware_verify = xFALSE;
 static xbool_t upgrade_in_place = xFALSE;
@@ -42,10 +43,12 @@ typedef struct {
 } image_header_t;
 #pragma pack(pop)
 
-static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
 static int upgrade_feature_entry();
 static void use_upgrade_feature(xoptions context)
 { register_feature_function(upgrade_feature_entry); }
+static int hexchar_to_int(char c);
+static err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len);
+static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
 
 err_t upgrade_usage_init(xoptions root) {
     if (!root)
@@ -54,12 +57,13 @@ err_t upgrade_usage_init(xoptions root) {
     xoptions upgrade = xoptions_create_subcommand(root, "upgrade", "Perform a system firmware upgrade.");
     xoptions_set_posthook(upgrade, use_upgrade_feature);
     xoptions_add_string(upgrade, 'i', "image", "<firmware.iota>", "Path to the firmware image file (.iota)", &firmware_path, xTRUE);
-    xoptions_add_boolean(upgrade, '\0', "skip-auth", "Bypass authentication tag validation (insecure)", &skip_firmware_auth);
+    // xoptions_add_boolean(upgrade, '\0', "skip-auth", "Bypass authentication tag validation (insecure)", &skip_firmware_auth);
     xoptions_add_boolean(upgrade, '\0', "skip-verify", "Bypass digital signature verification (insecure)", &skip_firmware_verify);
     xoptions_add_number(upgrade, 's', "stream-count", "<count>", "Number of bytes per data chunk for streaming decryption and verification", &stream_count, xFALSE);
     xoptions_add_string(upgrade, '\0', "verify", "<public_key.pem>", "Path to the public key PEM file for signature validation", &key_path, xFALSE);
     xoptions_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
     xoptions_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
+    xoptions_add_string(upgrade, 'k', "key", "<hexkey>", "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.", &hexkey, xFALSE);
 
     return X_RET_OK;
 }
@@ -105,6 +109,18 @@ int upgrade_feature_entry() {
     uint8_t tag[AES_GCM_TAG_LEN] = {0};
     uint8_t signature[RSA_SIGNATURE_LEN] = {0};
     time_t start_time = time(NULL);
+    uint8_t key[AES_GCM_KEY_LEN] = {0};
+
+    // Judge key
+    if (hexkey) {
+        if (parse_hex_key(hexkey, key, AES_GCM_KEY_LEN) != X_RET_OK) {
+            XLOG_E("Invalid hex key format.");
+            os_file_close(in);
+            return X_RET_INVAL;
+        }
+    } else {
+        memcpy(key, default_key, AES_GCM_KEY_LEN);
+    }
 
     // Read IOTA header
     size_t header_read_size = fread(&header, 1, sizeof(image_header_t), in);
@@ -377,7 +393,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
             err = X_RET_OK; // Success for main return
         } else {
             /* Verify failed */
-            XLOG_E("Decryption failed: tag verification failed. error_code: %d", err);
+            XLOG_E("Decryption failed: tag verification failed.");
             err = X_RET_ERROR;
         }
 
@@ -627,4 +643,21 @@ static void XLOG_P(const char *prefix, const char *postfix, size_t current, size
         fprintf(stderr, "\r%s [%s] %3d%% , %s", prefix, bar, (int)(progress*100), postfix);
 
     fflush(stderr);
+}
+
+int hexchar_to_int(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len) {
+    for (size_t i = 0; i < key_len; i++) {
+        int high = hexchar_to_int(hex[i*2]);
+        int low  = hexchar_to_int(hex[i*2 + 1]);
+        if (high < 0 || low < 0) return X_RET_BADFMT;
+        key[i] = (high << 4) | low;
+    }
+    return X_RET_OK;
 }
