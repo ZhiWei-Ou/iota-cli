@@ -306,16 +306,20 @@ err_t unmount_inactive_partition(void) {
 
     xstring_free(&inactive_part);
 
-    xstring cmd = xstring_init_format("umount %s && rmdir %s",
+    // Change directory to avoid "device is busy" error
+    chdir("/");
+    xstring cmd = xstring_init_format("sync && umount %s && rmdir %s",
                                       INACTIVE_PARTITION_MOUNT_POINT, INACTIVE_PARTITION_MOUNT_POINT);
     exec_t r = exec_command(xstring_to_string(&cmd));
-    xstring_free(&cmd);
     if (!exec_success(r)) {
-        XLOG_E("Failed to unmount inactive partition. output: %s", exec_output(r));
+        XLOG_E("Failed to unmount inactive partition. command: `%s`, error code: %d",
+               xstring_to_string(&cmd), exec_code(r));
+        xstring_free(&cmd);
         exec_free(r);
         return X_RET_ERROR;
     }
 
+    xstring_free(&cmd);
     exec_free(r);
 
     return X_RET_OK;
