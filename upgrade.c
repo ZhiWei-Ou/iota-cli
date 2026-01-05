@@ -79,7 +79,7 @@ static err_t verify_rsa_signature(FILE *in,
                                   size_t signature_size,
                                   const char *public_key_pem_path);
 
-static err_t unpack_firmware_package(const char *tar_gz_path, const char *output_dir);
+static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir);
 static err_t install_firmware(const char *firmware_dir);
 static err_t cleanup_temporary_resources();
 
@@ -222,7 +222,7 @@ int upgrade_feature_entry() {
 
 #if 0
     XLOG_I("Unpacking firmware package");
-    err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, FIRMWARE_EXTRACTED_DIR);
+    err = unpack_with_install(TEMPORARY_TARGZ_PATH, FIRMWARE_EXTRACTED_DIR);
     if (err != X_RET_OK) {
         XLOG_E("Failed to unpack firmware package");
         goto exit;
@@ -236,17 +236,12 @@ int upgrade_feature_entry() {
     }
 #else
     {
-        time_t start_time = time(NULL);
         XLOG_I("Unpacking and installing firmware package");
-        err = unpack_firmware_package(TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
+        err = unpack_with_install(TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
         if (err != X_RET_OK) {
             XLOG_E("Failed to unpack firmware package");
             goto exit;
         }
-
-        time_t end_time = time(NULL);
-
-        XLOG_I("Firmware package unpacked and installed successfully. Total time: %jd (s).", end_time - start_time);
     }
 #endif
 
@@ -469,14 +464,98 @@ end:
     return err;
 }
 
-static err_t unpack_firmware_package(const char *tar_gz_path, const char *output_dir) {
+static int is_excluded(const char *path) {
+    const char *exclude[] = {
+        "proc/", "sys/", "dev/", "run/", "tmp/", "mnt/", "media/", NULL
+    };
+    for (int i = 0; exclude[i]; i++) {
+        size_t len = strlen(exclude[i]);
+        if (strncmp(path, exclude[i], len) == 0) return 1;
+    }
+    return 0;
+}
+
+static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir) {
     if (!os_file_exist(tar_gz_path)) {
         XLOG_E("Firmware package file does not exist: %s", tar_gz_path);
         return X_RET_NOTENT;
     }
 
-    xstring cmd = xstring_init_format("mkdir -p %s;"
-                                      "tar --warning=none "
+#if 1
+    struct archive *a, *disk;
+    struct archive_entry *entry;
+    la_int64_t total_size = 0, processed_size = 0;
+    size_t file_count = 0;
+
+    a = archive_read_new();
+    archive_read_support_format_tar(a);
+    archive_read_support_filter_all(a);  // xz, gz, bz2...
+    if (archive_read_open_filename(a, tar_gz_path, stream_count) != ARCHIVE_OK) {
+        XLOG_E("Failed to open archive: %s", archive_error_string(a));
+        return X_RET_ERROR;
+    }
+
+    // First pass: calculate total size for progress reporting
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        total_size += archive_entry_size(entry);
+        archive_read_data_skip(a);
+
+        XLOG_T("#%zu Archive entry: %s, size: %jd bytes", ++file_count, archive_entry_pathname(entry), archive_entry_size(entry));
+    }
+    archive_read_close(a);
+    archive_read_free(a);
+
+    // Reopen for unpacking
+    a = archive_read_new();
+    archive_read_support_format_tar(a);
+    archive_read_support_filter_all(a);
+    archive_read_open_filename(a, tar_gz_path, stream_count);
+
+    disk = archive_write_disk_new();
+    archive_write_disk_set_options(disk,
+                                   ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
+                                   ARCHIVE_EXTRACT_ACL  | ARCHIVE_EXTRACT_FFLAGS |
+                                   ARCHIVE_EXTRACT_OWNER
+                                   );
+    archive_write_disk_set_standard_lookup(disk);
+
+    chdir(output_dir);
+
+    time_t start_time = time(NULL);
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        const char *path = archive_entry_pathname(entry);
+
+        if (is_excluded(path)) {
+            archive_read_data_skip(a);
+            continue;
+        }
+
+        if (archive_write_header(disk, entry) == ARCHIVE_OK) {
+            const void *buff;
+            size_t size;
+            la_int64_t offset;
+            while (archive_read_data_block(a, &buff, &size, &offset) == ARCHIVE_OK) {
+                time_t current_time = time(NULL);
+                xstring postfix = xstring_init_format(" Elapsed: %jd (s)", current_time - start_time);
+                archive_write_data_block(disk, buff, size, offset);
+                processed_size += size;
+
+                XLOG_P("Unpacking&Installing", xstring_to_string(&postfix), processed_size, total_size);
+            }
+        }
+    }
+
+    time_t end_time = time(NULL);
+
+    XLOG_I("Firmware package unpacked and installed successfully. Total time: %jd (s).", end_time - start_time);
+
+    archive_read_close(a);
+    archive_read_free(a);
+    archive_write_close(disk);
+    archive_write_free(disk);
+
+#else
+    xstring cmd = xstring_init_format("tar --warning=none "
                                       "--exclude=proc "
                                       "--exclude=sys "
                                       "--exclude=dev "
@@ -495,6 +574,7 @@ static err_t unpack_firmware_package(const char *tar_gz_path, const char *output
         exec_free(output);
         return X_RET_ERROR;
     }
+#endif
 
     return X_RET_OK;
 }
