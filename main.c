@@ -1,5 +1,6 @@
 #define XLOG_MOD "main"
 #include <stdio.h>
+#include "main.h"
 #include "xlog.h"
 #include "xoptions.h"
 #include "version.h"
@@ -16,6 +17,7 @@ void register_feature_function(int (*entry)())
 
 int main(int argc, char** argv){
     xoptions root = xoptions_create_root();
+    xoptions_set_prefix_prompt(root, CLI_PROMPT);
 
     // Add global options
     xoptions_add_boolean(root, 'V', "verbose", "Enable verbose logging", &log_trace);

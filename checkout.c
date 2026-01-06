@@ -87,8 +87,13 @@ static void reboot_with_check() {
     if (!need_reboot) 
         return;
 
-    XLOG_W("Rebooting system after %d seconds...", reboot_delay_second);
-    sleep(reboot_delay_second);
+    if (reboot_delay_second <= 0) {
+        XLOG_W("Rebooting system immediately...");
+    } else {
+        XLOG_W("Rebooting system after %d seconds...", reboot_delay_second);
+        sleep(reboot_delay_second);
+    }
+
     exec_t r = exec_command("reboot");
     if (!exec_success(r)) {
         XLOG_E("Failed to reboot the system. return code: %d", r.code);

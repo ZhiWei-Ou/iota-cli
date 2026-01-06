@@ -87,7 +87,21 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
 static err_t install_firmware(const char *firmware_dir);
 static err_t cleanup_temporary_resources();
 
+static void on_cleanup(int status, void *arg) {
+    if (status != 0) {
+        XLOG_W("Upgrade interrupted with status %d, performing cleanup", status);
+    } else {
+        XLOG_D("Upgrade completed successfully, performing cleanup");
+    }
+
+    if (!upgrade_in_place) unmount_inactive_partition();
+
+    cleanup_temporary_resources();
+}
+
 int upgrade_feature_entry() {
+    on_exit(on_cleanup, NULL);
+
     if (!firmware_path) {
         XLOG_E("No update image specified.");
         return X_RET_INVAL;
@@ -258,6 +272,18 @@ int upgrade_feature_entry() {
             XLOG_E("Failed to unpack firmware package");
             goto exit;
         }
+
+        // Record IOTA package checksum 
+        xstring cmd = xstring_init_format("mkdir -p %s;sha256sum %s > %s/current.sha256",
+                                          upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota",
+                                          firmware_path,
+                                          upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota");
+        exec_t checksum = exec_command(xstring_to_string(&cmd));
+
+        XLOG_I("Recorded firmware package checksum to %s/current.sha256",
+               upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota");
+        xstring_free(&cmd);
+        exec_free(checksum);
     }
 #endif
 
@@ -265,9 +291,6 @@ int upgrade_feature_entry() {
     XLOG_I("Firmware upgrade completed successfully. Total time: %jd (s).", end_time - start_time);
 
 exit:
-    if (!upgrade_in_place) unmount_inactive_partition();
-
-    cleanup_temporary_resources();
 
     return err;
 }
