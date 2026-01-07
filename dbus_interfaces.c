@@ -1,4 +1,6 @@
+#define XLOG_MOD "dbus"
 #include "dbus_interfaces.h"
+#include "xlog.h"
 
 #include <dbus/dbus.h>
 #include <stdio.h>
@@ -19,10 +21,12 @@ int init_dbus_sender() {
 
     conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
     if (dbus_error_is_set(&err)) {
-        fprintf(stderr, "Connection Error (%s)\n", err.message);
+        XLOG_E("Connection Error (%s)", err.message);
         dbus_error_free(&err);
         return -1;
     }
+
+    XLOG_I("DBus initialized successfully");
     return 0;
 }
 
@@ -67,7 +71,7 @@ void update_status(const char *status, int percent, int total, int current) {
         fprintf(stderr, "Out Of Memory!\n");
     }
 
-    dbus_connection_flush(conn);
-
     dbus_message_unref(sig);
+
+    dbus_connection_flush(conn);
 }
