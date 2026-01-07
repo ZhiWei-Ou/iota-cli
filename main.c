@@ -1,5 +1,7 @@
 #define XLOG_MOD "main"
 #include <stdio.h>
+#include <signal.h>
+#include <stdlib.h>
 #include "main.h"
 #include "xlog.h"
 #include "xoptions.h"
@@ -15,7 +17,14 @@ int (*feature_entry)() = NULL;
 void register_feature_function(int (*entry)())
 { feature_entry = entry; }
 
+void sigint_handler(int sig) {
+    exit(sig);
+}
+
 int main(int argc, char** argv){
+    signal(SIGINT, sigint_handler);
+
+
     xoptions root = xoptions_create_root();
     xoptions_set_prefix_prompt(root, CLI_PROMPT);
 

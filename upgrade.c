@@ -12,6 +12,8 @@
 #include <openssl/err.h>
 #include <archive.h>
 #include <archive_entry.h>
+#include "notify.h"
+#include "dbus_interfaces.h"
 
 #define TEMPORARY_TARGZ_PATH "/tmp/upgrade_firmware.tar.gz"
 #define FIRMWARE_EXTRACTED_DIR "/tmp/firmware_extracted"
@@ -30,6 +32,7 @@ static xbool_t skip_firmware_auth = xFALSE;
 static xbool_t skip_firmware_verify = xFALSE;
 static xbool_t upgrade_in_place = xFALSE;
 static xbool_t dont_print_progress = xFALSE;
+static xbool_t progress_use_dbus = xFALSE;
 static char *key_path = NULL;
 static int stream_count = 4096;
 
@@ -49,6 +52,7 @@ static void use_upgrade_feature(xoptions context)
 static int hexchar_to_int(char c);
 static err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len);
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
+static void XLOG_WAITING(const char *prefix);
 
 err_t upgrade_usage_init(xoptions root) {
     if (!root)
@@ -64,6 +68,7 @@ err_t upgrade_usage_init(xoptions root) {
     xoptions_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
     xoptions_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
     xoptions_add_string(upgrade, 'k', "key", "<hexkey>", "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.", &hexkey, xFALSE);
+    xoptions_add_boolean(upgrade, '\0', "dbus-progress", "Use D-Bus to report progress updates", &progress_use_dbus);
 
     return X_RET_OK;
 }
@@ -88,8 +93,10 @@ static err_t install_firmware(const char *firmware_dir);
 static err_t cleanup_temporary_resources();
 
 static void on_cleanup(int status, void *arg) {
+    fprintf(stderr, "\n\033[?25h");
+
     if (status != 0) {
-        XLOG_W("Upgrade interrupted with status %d, performing cleanup", status);
+        XLOG_W("Upgrade interrupted with signal '%s'(%d), performing cleanup", strsignal(status), status);
     } else {
         XLOG_D("Upgrade completed successfully, performing cleanup");
     }
@@ -105,6 +112,10 @@ int upgrade_feature_entry() {
     if (!firmware_path) {
         XLOG_E("No update image specified.");
         return X_RET_INVAL;
+    }
+
+    if (progress_use_dbus) {
+        register_dbus_notify_operators();
     }
 
     XLOG_I("Starting upgrade, firmware package: '%s', verification public key file: '%s'",
@@ -534,11 +545,13 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
         return X_RET_ERROR;
     }
 
+    XLOG_I("Calculating total size of archive entries for progress reporting");
     // First pass: calculate total size for progress reporting
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
         total_size += archive_entry_size(entry);
         archive_read_data_skip(a);
 
+        XLOG_WAITING("Calculating");
         XLOG_T("#%zu Archive entry: %s, size: %jd bytes", ++file_count, archive_entry_pathname(entry), archive_entry_size(entry));
     }
     archive_read_close(a);
@@ -645,6 +658,25 @@ static err_t cleanup_temporary_resources() {
 }
 
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total) {
+
+    if (progress_use_dbus) {
+        static int last_precent = -1;
+        int current_percent = 0;
+
+        if (total > 0) {
+            current_percent = (int)((uint64_t)current * 100 / total);
+        }
+
+        if (current_percent != last_precent) {
+            notify_operators_t *ops = get_notify_operators();
+            if (ops && ops->update_status) {
+                ops->update_status(prefix, current_percent, (int)total, (int)current);
+            }
+
+            last_precent = current_percent;
+        }
+    }
+
     if (dont_print_progress) return;
 
     const int bar_width = 50;
@@ -666,6 +698,34 @@ static void XLOG_P(const char *prefix, const char *postfix, size_t current, size
         fprintf(stderr, "\r%s [%s] %3d%% , %s", prefix, bar, (int)(progress*100), postfix);
 
     fflush(stderr);
+}
+
+static void XLOG_WAITING(const char *prefix) {
+
+    if (dont_print_progress) return;
+    if (prefix == NULL) return;
+
+    const char *dots[] = {"", ".", "..", "..."};
+    static int dot_index = 0;
+    static time_t last_update = 0;
+    static const char *msg = NULL;
+
+    if (msg == NULL) msg = prefix;
+    else if (strcmp(msg, prefix) != 0) {
+        msg = prefix;
+        dot_index = 0;
+    }
+
+    if (last_update == 0) last_update = time(NULL);
+    time_t current_time = time(NULL);
+    if (current_time - last_update < 1) return;
+    last_update = current_time;
+
+    fprintf(stderr, "\033[?25l"); // hide cursor
+    fprintf(stderr, "\r\033[K%s%s", prefix, dots[dot_index++]);
+    fflush(stderr);
+
+    dot_index %= 4;
 }
 
 int hexchar_to_int(char c) {
