@@ -5,6 +5,7 @@
 #include "os_file.h"
 #include "checkout.h"
 #include "xlog.h"
+#include "xstring.h"
 #include <time.h>
 #include <string.h>
 #include <openssl/evp.h>
@@ -32,7 +33,7 @@ static xbool_t skip_firmware_auth = xFALSE;
 static xbool_t skip_firmware_verify = xFALSE;
 static xbool_t upgrade_in_place = xFALSE;
 static xbool_t dont_print_progress = xFALSE;
-static xbool_t progress_use_dbus = xFALSE;
+static xbool_t enable_dbus = xFALSE;
 static char *key_path = NULL;
 static int stream_count = 4096;
 
@@ -52,7 +53,37 @@ static void use_upgrade_feature(xoptions context)
 static int hexchar_to_int(char c);
 static err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len);
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
-static void XLOG_WAITING(const char *prefix);
+static void XLOG_WAITING(const char *message);
+#define notify_progress(step, percent, total, current) do { \
+    if (!enable_dbus) break; \
+    notify_operators_t *ops = get_notify_operators(); \
+    if (ops && ops->progress_changed) { \
+        ops->progress_changed(step, percent, total, current); \
+    } \
+} while(0)
+#define notify_message(message) do { \
+    if (!enable_dbus) break; \
+    notify_operators_t *ops = get_notify_operators(); \
+    if (ops && ops->message_logged) { \
+        ops->message_logged(message); \
+    } \
+} while(0)
+#define notify_message_fmt(fmt, ...) do { \
+    if (!enable_dbus) break; \
+    xstring message = xstring_init_format(fmt, __VA_ARGS__); \
+    notify_operators_t *ops = get_notify_operators(); \
+    if (ops && ops->message_logged) { \
+        ops->message_logged(xstring_to_string(&message)); \
+    } \
+    xstring_free(&message); \
+} while(0)
+#define notify_error(code, message) do { \
+    if (!enable_dbus) break; \
+    notify_operators_t *ops = get_notify_operators(); \
+    if (ops && ops->error_occurred) { \
+        ops->error_occurred(code, message); \
+    } \
+} while(0)
 
 err_t upgrade_usage_init(xoptions root) {
     if (!root)
@@ -68,7 +99,7 @@ err_t upgrade_usage_init(xoptions root) {
     xoptions_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
     xoptions_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
     xoptions_add_string(upgrade, 'k', "key", "<hexkey>", "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.", &hexkey, xFALSE);
-    xoptions_add_boolean(upgrade, '\0', "dbus-progress", "Use D-Bus to report progress updates", &progress_use_dbus);
+    xoptions_add_boolean(upgrade, '\0', "enable-dbus", "Use D-Bus to notify event", &enable_dbus);
 
     return X_RET_OK;
 }
@@ -114,7 +145,8 @@ int upgrade_feature_entry() {
         return X_RET_INVAL;
     }
 
-    if (progress_use_dbus) {
+    if (enable_dbus) {
+        XLOG_I("Initializing D-Bus for notifications");
         register_dbus_notify_operators();
     }
 
@@ -154,6 +186,10 @@ int upgrade_feature_entry() {
         os_file_close(in);
         return X_RET_ERROR;
     }
+
+    notify_message_fmt("Firmware: %s, Date: %.*s",
+                       os_file_basename(firmware_path),
+                       (int)sizeof(header.datetime), header.datetime);
 
     XLOG_D("Firmware header:");
     XLOG_D(" Magic: %c%c%c%c", header.magic[0], header.magic[1], header.magic[2], header.magic[3]);
@@ -200,7 +236,7 @@ int upgrade_feature_entry() {
             return X_RET_INVAL;
         }
 
-        XLOG_I("Verifying image signature");
+        XLOG_I("Verifying firmware signature");
 
         fseek(in, 0, SEEK_SET); // Seek back to the beginning for signature verification
         err = verify_rsa_signature(in,
@@ -210,7 +246,8 @@ int upgrade_feature_entry() {
                                    key_path);
 
         if (err != X_RET_OK) {
-            XLOG_E("Image signature verification failed");
+            notify_error(500, "Firmware signature verification failed");
+            XLOG_E("Firmware signature verification failed");
             os_file_close(in);
             return err;
         }
@@ -429,6 +466,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
             /* Verify failed */
             XLOG_E("Decryption failed: tag verification failed.");
             err = X_RET_ERROR;
+            notify_error(500, "Decryption failed");
         }
 
     }
@@ -541,11 +579,13 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
     archive_read_support_format_tar(a);
     archive_read_support_filter_all(a);  // xz, gz, bz2...
     if (archive_read_open_filename(a, tar_gz_path, stream_count) != ARCHIVE_OK) {
+        notify_error(500, "Failed to open archive");
         XLOG_E("Failed to open archive: %s", archive_error_string(a));
         return X_RET_ERROR;
     }
 
     XLOG_I("Calculating total size of archive entries for progress reporting");
+    notify_message("Calculating");
     // First pass: calculate total size for progress reporting
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
         total_size += archive_entry_size(entry);
@@ -659,7 +699,7 @@ static err_t cleanup_temporary_resources() {
 
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total) {
 
-    if (progress_use_dbus) {
+    if (enable_dbus) {
         static int last_precent = -1;
         int current_percent = 0;
 
@@ -668,11 +708,7 @@ static void XLOG_P(const char *prefix, const char *postfix, size_t current, size
         }
 
         if (current_percent != last_precent) {
-            notify_operators_t *ops = get_notify_operators();
-            if (ops && ops->update_status) {
-                ops->update_status(prefix, current_percent, (int)total, (int)current);
-            }
-
+            notify_progress(prefix, current_percent, (int)total, (int)current);
             last_precent = current_percent;
         }
     }
@@ -700,19 +736,18 @@ static void XLOG_P(const char *prefix, const char *postfix, size_t current, size
     fflush(stderr);
 }
 
-static void XLOG_WAITING(const char *prefix) {
-
+static void XLOG_WAITING(const char *message) {
     if (dont_print_progress) return;
-    if (prefix == NULL) return;
+    if (message == NULL) return;
 
     const char *dots[] = {"", ".", "..", "..."};
     static int dot_index = 0;
     static time_t last_update = 0;
     static const char *msg = NULL;
 
-    if (msg == NULL) msg = prefix;
-    else if (strcmp(msg, prefix) != 0) {
-        msg = prefix;
+    if (msg == NULL) msg = message;
+    else if (strcmp(msg, message) != 0) {
+        msg = message;
         dot_index = 0;
     }
 
@@ -722,7 +757,7 @@ static void XLOG_WAITING(const char *prefix) {
     last_update = current_time;
 
     fprintf(stderr, "\033[?25l"); // hide cursor
-    fprintf(stderr, "\r\033[K%s%s", prefix, dots[dot_index++]);
+    fprintf(stderr, "\r\033[K%s%s", message, dots[dot_index++]);
     fflush(stderr);
 
     dot_index %= 4;
