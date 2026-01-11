@@ -1,14 +1,14 @@
 /**
  * @brief 选项解析器
- * @file xoptions.c
+ * @file xoption.c
  * @author Oswin
  * @date 2025-12-01
  * @details A modern and lightweight command-line option parsing library.
  *
  * @copyright (c) 2025 Intretech Software Development Department. All Rights Reserved.
  */
-#define XLOG_MOD "xoptions"
-#include "xoptions.h"
+#define XLOG_MOD "xoption"
+#include "xoption.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -21,114 +21,110 @@
 
 typedef enum {
   /**< short option. e.g. '-a' */
-  XOPTIONS_KIND_SHORT,
+  xoption_KIND_SHORT,
 
   /**< long option. e.g. '--a' */
-  XOPTIONS_KIND_LONG,
+  xoption_KIND_LONG,
 
   /**< positional separator. e.g. '--' */
-  XOPTIONS_KIND_POSITIONAL_SEPARATOR,
+  xoption_KIND_POSITIONAL_SEPARATOR,
 
   /**< positional or subcommand. e.g. 'a' */
-  XOPTIONS_KIND_POSITIONAL_OR_SUBCOMMAND,
+  xoption_KIND_POSITIONAL_OR_SUBCOMMAND,
 
-  XOPTIONS_KIND_END
-} xoptions_kind;
+  xoption_KIND_END
+} xoption_kind;
 typedef enum {
-  XOPTIONS_CANDIDATE_TYPE_SUBCOMMAND = 0x00,
+  xoption_CANDIDATE_TYPE_SUBCOMMAND = 0x00,
 
-  XOPTIONS_CANDIDATE_TYPE_OPTION = 0x10,
-  XOPTIONS_CANDIDATE_TYPE_NUMBER = 0x11,
-  XOPTIONS_CANDIDATE_TYPE_BOOLEAN = 0x12,
-  XOPTIONS_CANDIDATE_TYPE_STRING = 0x14,
-  XOPTIONS_CANDIDATE_TYPE_ACTION = 0x18,
+  xoption_CANDIDATE_TYPE_OPTION = 0x10,
+  xoption_CANDIDATE_TYPE_NUMBER = 0x11,
+  xoption_CANDIDATE_TYPE_BOOLEAN = 0x12,
+  xoption_CANDIDATE_TYPE_STRING = 0x14,
+  xoption_CANDIDATE_TYPE_ACTION = 0x18,
 
-  XOPTIONS_CANDIDATE_TYPE_END = 0x20
-} xoptions_candidate_type;
+  xoption_CANDIDATE_TYPE_END = 0x20
+} xoption_candidate_type;
 
-struct xoptions_candidate_priv {
-  xoptions_candidate_type type; /**< the type of the candidate */
+struct xoption_candidate_priv {
+  xoption_candidate_type type; /**< the type of the candidate */
   char sn; /**< the short name of the option. if == '\0', it means this option
               does not provide a short form. */
-  const char* ln;        /**< the long name of the option. if empty, it means
-                            this option does not provide a long form */
-  const char* hint;      /**< the hint of the option */
-  const char* desc;      /**< the description of the option */
-  xoptions subcommand;   /**< the subcommand */
-  xoptions_action_fn fn; /**< the action function */
-  void* storing_ptr;     /**< the pointer to store the value */
-  xbool_t required;      /**< whether this option is required */
-  xbool_t used;          /**< whether this option is used */
-  xoptions context;      /**< the context of the option */
+  const char* ln;       /**< the long name of the option. if empty, it means
+                           this option does not provide a long form */
+  const char* hint;     /**< the hint of the option */
+  const char* desc;     /**< the description of the option */
+  xoption subcommand;   /**< the subcommand */
+  xoption_action_fn fn; /**< the action function */
+  void* storing_ptr;    /**< the pointer to store the value */
+  xbool_t required;     /**< whether this option is required */
+  xbool_t used;         /**< whether this option is used */
+  xoption context;      /**< the context of the option */
 };
 
-struct xoptions_priv {
-  const char*
-      name; /**< Name of the subcommand. The root command has no name. */
-  const char* first_argument;        /**< the first argument, argv[0] */
-  struct xlist_priv candidates;      /**< the candidates list */
-  struct xlist_priv positional_args; /**< the positional arguments list */
-  xbool_t done;                      /**< whether the parsing is done */
-  xbool_t end_of_options; /**< whether the parsing is at the end of options,
-                             e.g. all of arguments after '--' */
-  xoptions_action_hook_fn prehook; /**< the prehook function, if exists, it will
-                                      be called before the parsing */
-  xoptions_action_hook_fn posthook; /**< the posthook function, if exists, it
-                                       will be called after the parsing */
-  err_t err;                        /**< the error code */
-  const char* desc;                 /**< the description of the command */
-  const char* prefix_prompt;        /**< the prefix prompt */
-  const char* suffix_prompt;        /**< the help message */
+struct xoption_priv {
+  const char* name;                  /**< Subcommand name (root has none) */
+  const char* first_argument;        /**< argv[0] */
+  struct xlist_priv candidates;      /**< Candidate options */
+  struct xlist_priv positional_args; /**< Positional arguments */
+  xbool_t done;                      /**< Parsing finished */
+  xbool_t end_of_options;            /**< After '--' */
+  xoption_run_fn post_cb;            /**< Post-parse callback */
+  err_t err;                         /**< Error code */
+  const char* desc;                  /**< Command description */
+  const char* prefix_prompt;         /**< Help prefix */
+  const char* suffix_prompt;         /**< Help suffix */
+  void* context;                     /**< User context */
 };
 
-static xoptions_candidate __candidate_new();
-static void __candidate_free(xoptions_candidate self);
-static void __candidate_print(xoptions_candidate self,
+static xoption_candidate __candidate_new();
+static void __candidate_free(xoption_candidate self);
+static void __candidate_print(xoption_candidate self,
                               size_t left_width,
                               const char* front_padding,
                               const char* back_padding);
-static err_t __candidate_assignment(xoptions_candidate self,
+static err_t __candidate_assignment(xoption_candidate self,
                                     const char* next,
                                     int* argv_index,
                                     xbool_t is_inline_arg);
-static err_t __candidate_assignment_number(xoptions_candidate self,
+static err_t __candidate_assignment_number(xoption_candidate self,
                                            const char* next,
                                            int* argv_index,
                                            xbool_t is_inline_arg);
-static err_t __candidate_assignment_boolean(xoptions_candidate self,
+static err_t __candidate_assignment_boolean(xoption_candidate self,
                                             const char* next,
                                             int* argv_index,
                                             xbool_t is_inline_arg);
-static err_t __candidate_assignment_string(xoptions_candidate self,
+static err_t __candidate_assignment_string(xoption_candidate self,
                                            const char* next,
                                            int* argv_index,
                                            xbool_t is_inline_arg);
-static err_t __candidate_assignment_action(xoptions_candidate self,
+static err_t __candidate_assignment_action(xoption_candidate self,
                                            const char* value);
 static err_t __atoi(const char* value, int* out);
 static xbool_t __is_short_option(const char* name, char** start);
 static xbool_t __is_long_option(const char* name, char** start);
 static xbool_t __is_positional_separator(const char* name);
-static void __xoptions_default_helper_action(xoptions self, void* user_data);
-static void __xoptions_check_required(xoptions self);
-static void __xoptions_try_match_candidate(xoptions self,
-                                           int* curr_index,
-                                           int argc,
-                                           char** argv);
+static void __xoption_default_helper_action(xoption self, void* user_data);
+static void __xoption_check_required(xoption self);
+static void __xoption_try_match_candidate(xoption self,
+                                          int* curr_index,
+                                          int argc,
+                                          char** argv);
 static void __print_options(const xlist options);
 static void __print_commands(const xlist commands);
 static const char* __basename(const char* path);
 
 /**
- * @brief Enables helper functions for xoptions.
- *  This function will call @ref xoptions_add_action to add the 'h' and
+ * @brief Enables helper functions for xoption.
+ *  This function will call @ref xoption_add_action to add the 'h' and
  *  the 'help' options.
- * @param self The xoptions instance.
+ * @param self The xoption instance.
  */
-void xoptions_enable_default_hepler(xoptions self);
+void xoption_enable_default_hepler(xoption self);
 
-xoptions xoptions_create_root() {
-  xoptions self = (xoptions)xbox_malloc(sizeof(struct xoptions_priv));
+xoption xoption_create_root() {
+  xoption self = (xoption)xbox_malloc(sizeof(struct xoption_priv));
   if (!self) return NULL;
 
   self->name = "";
@@ -137,24 +133,23 @@ xoptions xoptions_create_root() {
   xlist_init(&self->positional_args);
   self->done = xFALSE;
   self->end_of_options = xFALSE;
-  self->prehook = NULL;
-  self->posthook = NULL;
+  self->post_cb = NULL;
   self->err = X_RET_OK;
   self->desc = "";
   self->prefix_prompt = "";
   self->suffix_prompt = "";
 
-  xoptions_enable_default_hepler(self);
+  xoption_enable_default_hepler(self);
 
   return self;
 }
 
-err_t xoptions_disable_default_hepler(xoptions self) {
+err_t xoption_disable_default_hepler(xoption self) {
   if (!self) return X_RET_INVAL;
 
   void* item;
   xlist_foreach(&self->candidates, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
     if (candidate->sn == 'h' && strcmp(candidate->ln, "help") == 0) {
       xlist_remove(&self->candidates, candidate);
       __candidate_free(candidate);
@@ -165,35 +160,47 @@ err_t xoptions_disable_default_hepler(xoptions self) {
   return X_RET_OK;
 }
 
-void xoptions_enable_default_hepler(xoptions self) {
+void xoption_enable_default_hepler(xoption self) {
   if (!self) return;
 
-  xoptions_add_action(self,
-                      'h',
-                      "help",
-                      "Display this help message.",
-                      __xoptions_default_helper_action,
-                      NULL);
+  xoption_add_action(self,
+                     'h',
+                     "help",
+                     "Display this help message.",
+                     __xoption_default_helper_action,
+                     NULL);
 
   return;
 }
 
-xoptions xoptions_create_subcommand(xoptions root,
-                                    const char* name,
-                                    const char* desc) {
-  xoptions self = xoptions_create_root();
+err_t xoption_set_context(xoption self, void* context) {
+  if (!self) return X_RET_INVAL;
+  self->context = context;
+  return X_RET_OK;
+}
+
+void* xoption_get_context(xoption self) {
+  if (!self) return NULL;
+
+  return self->context;
+}
+
+xoption xoption_create_subcommand(xoption root,
+                                  const char* name,
+                                  const char* desc) {
+  xoption self = xoption_create_root();
 
   if (!self) return NULL;
   self->name = name;
   self->desc = desc;
 
-  xoptions_candidate candidate = __candidate_new();
+  xoption_candidate candidate = __candidate_new();
   if (!candidate) {
-    xoptions_destroy(self);
+    xoption_destroy(self);
     return NULL;
   }
 
-  candidate->type = XOPTIONS_CANDIDATE_TYPE_SUBCOMMAND;
+  candidate->type = xoption_CANDIDATE_TYPE_SUBCOMMAND;
   candidate->subcommand = self;
   candidate->context = root;
   candidate->desc = desc;
@@ -203,40 +210,34 @@ xoptions xoptions_create_subcommand(xoptions root,
   return self;
 }
 
-err_t xoptions_set_prefix_prompt(xoptions self, const char* prompt) {
+err_t xoption_set_prefix_prompt(xoption self, const char* prompt) {
   if (!self || !prompt) return X_RET_INVAL;
 
   self->prefix_prompt = prompt;
   return X_RET_OK;
 }
 
-err_t xoptions_set_suffix_prompt(xoptions self, const char* prompt) {
+err_t xoption_set_suffix_prompt(xoption self, const char* prompt) {
   if (!self || !prompt) return X_RET_INVAL;
 
   self->suffix_prompt = prompt;
   return X_RET_OK;
 }
 
-err_t xoptions_set_prehook(xoptions self, xoptions_action_hook_fn prehook) {
-  if (!self || !prehook) return X_RET_INVAL;
+err_t xoption_set_post_parse_callback(xoption self, xoption_run_fn callback) {
+  if (!self || !callback) return X_RET_INVAL;
 
-  self->prehook = prehook;
-  return X_RET_OK;
-}
-err_t xoptions_set_posthook(xoptions self, xoptions_action_hook_fn posthook) {
-  if (!self || !posthook) return X_RET_INVAL;
-
-  self->posthook = posthook;
+  self->post_cb = callback;
   return X_RET_OK;
 }
 
-err_t xoptions_destroy(xoptions self) {
+err_t xoption_destroy(xoption self) {
   if (self == NULL) return X_RET_INVAL;
 
   void* data_ptr = NULL;
   for (data_ptr = xlist_pop_back(&self->candidates); data_ptr;
        data_ptr = xlist_pop_back(&self->candidates)) {
-    __candidate_free((xoptions_candidate)data_ptr);
+    __candidate_free((xoption_candidate)data_ptr);
   }
 
   for (data_ptr = xlist_pop_back(&self->positional_args); data_ptr;
@@ -248,10 +249,10 @@ err_t xoptions_destroy(xoptions self) {
   return X_RET_OK;
 }
 
-static void __xoptions_try_match_candidate(xoptions self,
-                                           int* curr_index,
-                                           int argc,
-                                           char** argv) {
+static void __xoption_try_match_candidate(xoption self,
+                                          int* curr_index,
+                                          int argc,
+                                          char** argv) {
   int index = *curr_index;
   const char* curr = argv[index]; /* the current const argument */
   const char* next = index + 1 < argc ? argv[index + 1]
@@ -260,7 +261,7 @@ static void __xoptions_try_match_candidate(xoptions self,
   xbool_t is_inline_argument = xFALSE;        // e.g. --arg=123
   xbool_t is_combined_argument = xFALSE;  // e.g. -abc (the same as -a -b -c)
 
-  xoptions_kind kind = XOPTIONS_KIND_END;
+  xoption_kind kind = xoption_KIND_END;
   char* pos = (char*)curr;
   size_t pos_len = strlen(pos);
 
@@ -277,25 +278,25 @@ static void __xoptions_try_match_candidate(xoptions self,
 
   if (__is_short_option(pos, &pos)) {
     /* skip the '-', and then copy option name to 'safe_buf' */
-    kind = XOPTIONS_KIND_SHORT;
+    kind = xoption_KIND_SHORT;
     strcpy(safe_buf, pos);
 
     if (strlen(safe_buf) > 1) is_combined_argument = xTRUE;
 
   } else if (__is_long_option(pos, &pos)) {
     /* skip the '--', and then copy option name to 'safe_buf' */
-    kind = XOPTIONS_KIND_LONG;
+    kind = xoption_KIND_LONG;
     strcpy(safe_buf, pos);
   } else if (__is_positional_separator(pos)) {
     /* the current argument is a positional separator
      * exit match candidate process.*/
-    kind = XOPTIONS_KIND_POSITIONAL_SEPARATOR;
+    kind = xoption_KIND_POSITIONAL_SEPARATOR;
     self->end_of_options = xTRUE;
     goto exit;
   } else {
     /* the current argument is a positional argument or a subcommand.
      * copy the current argument to 'safe_buf' */
-    kind = XOPTIONS_KIND_POSITIONAL_OR_SUBCOMMAND;
+    kind = xoption_KIND_POSITIONAL_OR_SUBCOMMAND;
     strcpy(safe_buf, pos);
   }
 
@@ -317,13 +318,13 @@ static void __xoptions_try_match_candidate(xoptions self,
 
   /* use current option 'safe_buf' to check all candidates. */
   xlist_foreach(&self->candidates, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
 
     /* Exit early if an error occurred or parsing is already complete,
    e.g., when encountering an action like '-h' or '--help'. */
     if (self->done == xTRUE) break;
 
-    if (kind == XOPTIONS_KIND_SHORT) {
+    if (kind == xoption_KIND_SHORT) {
       const char* tmp_ptr = safe_buf;
 
       /* check combined form, such as '-abc'.
@@ -343,27 +344,27 @@ static void __xoptions_try_match_candidate(xoptions self,
         /* '=' is not allowed for short options;
          * use space to separate the value instead. */
         if (is_inline_argument) {
-          xoptions_done(self,
-                        xTRUE,
-                        "error: option '-%c' does not accept '=' form ('-%s' "
-                        "is "
-                        "invalid).\n",
-                        candidate->sn,
-                        safe_buf);
+          xoption_done(self,
+                       xTRUE,
+                       "error: option '-%c' does not accept '=' form ('-%s' "
+                       "is "
+                       "invalid).\n",
+                       candidate->sn,
+                       safe_buf);
           break;
         }
 
         /* only boolean short options can be combined (e.g., -abc). */
         if (is_combined_argument &&
-            candidate->type != XOPTIONS_CANDIDATE_TYPE_BOOLEAN) {
+            candidate->type != xoption_CANDIDATE_TYPE_BOOLEAN) {
           // clang-format off
-            xoptions_done(self, xTRUE,
+            xoption_done(self, xTRUE,
                           "option '-%c' requires a value and cannot be used in a combined form: '-%s'\n",
                           candidate->sn, safe_buf);
           // clang-format on
           break;
         } else if (is_combined_argument &&
-                   candidate->type == XOPTIONS_CANDIDATE_TYPE_BOOLEAN) {
+                   candidate->type == xoption_CANDIDATE_TYPE_BOOLEAN) {
           /* set next to NULL.
            * For example, in cases like '-abc true', do not treat 'true' as a
            * short option argument.
@@ -375,24 +376,24 @@ static void __xoptions_try_match_candidate(xoptions self,
         }
       }  // end if found
 
-    } else if (kind == XOPTIONS_KIND_LONG) {
+    } else if (kind == xoption_KIND_LONG) {
       if (!strcmp(candidate->ln, safe_buf)) {
         __candidate_assignment(candidate, next, curr_index, is_inline_argument);
         option_active = xTRUE;
         break;
       }
 
-    } else if (kind == XOPTIONS_KIND_POSITIONAL_OR_SUBCOMMAND) {
+    } else if (kind == xoption_KIND_POSITIONAL_OR_SUBCOMMAND) {
       if (candidate->subcommand &&
           !strcmp(candidate->subcommand->name, safe_buf)) {
         option_active = xTRUE;
 
         /* recursively parse subcommand */
-        xoptions_parse(candidate->subcommand, argc - index, &argv[index]);
+        xoption_parse(candidate->subcommand, argc - index, &argv[index]);
 
         /* stop parsing options at the current level, because parsing has
            entered a subcommand context. */
-        xoptions_done(self, xFALSE, NULL);
+        xoption_done(self, xFALSE, NULL);
 
         /* inherit error code from subcommand */
         self->err = candidate->subcommand->err;
@@ -406,16 +407,16 @@ static void __xoptions_try_match_candidate(xoptions self,
    *   - it is an unrecognized option.
    */
   if (!option_active) {
-    if (kind == XOPTIONS_KIND_POSITIONAL_OR_SUBCOMMAND) {
+    if (kind == xoption_KIND_POSITIONAL_OR_SUBCOMMAND) {
       XLOG_T("@%s, '%s' is a positional argument",
              __basename(self->first_argument),
              argv[index]);
       xlist_push_back(&self->positional_args, argv[index]);
     } else {
-      xoptions_done(self,
-                    xTRUE,
-                    "error: unrecognized option '%s'\n\n",
-                    argv[index]);
+      xoption_done(self,
+                   xTRUE,
+                   "error: unrecognized option '%s'\n\n",
+                   argv[index]);
     }
   }
 
@@ -425,13 +426,11 @@ exit:
   }
 }
 
-err_t xoptions_parse(xoptions self, int argc, char* argv[]) {
+err_t xoption_parse(xoption self, int argc, char* argv[]) {
   if (!self || argc <= 0 || argv == NULL) return X_RET_INVAL;
 
   int idx = 0;
   self->first_argument = argv[idx++];
-
-  if (self->prehook) self->prehook(self);
 
   while (idx < argc && self->done == xFALSE) {
     if (self->end_of_options == xTRUE) {
@@ -446,7 +445,7 @@ err_t xoptions_parse(xoptions self, int argc, char* argv[]) {
       XLOG_T("@%s, parsing option: '%s'",
              __basename(self->first_argument),
              argv[idx]);
-      __xoptions_try_match_candidate(self, &idx, argc, argv);
+      __xoption_try_match_candidate(self, &idx, argc, argv);
       ++idx;
     }
   }
@@ -457,18 +456,19 @@ err_t xoptions_parse(xoptions self, int argc, char* argv[]) {
    * normal validation flow.
    */
   if (self->done == xFALSE) {
-    __xoptions_check_required(self);
+    __xoption_check_required(self);
   }
 
-  if (self->posthook) self->posthook(self);
+  /* If error not occurred, run post-parse callback */
+  if (self->post_cb && self->err == X_RET_OK) self->err = self->post_cb(self);
 
   return self->err;
 }
 
-void xoptions_done(xoptions self,
-                   xbool_t print_help,
-                   const char* error_fmt,
-                   ...) {
+void xoption_done(xoption self,
+                  xbool_t print_help,
+                  const char* error_fmt,
+                  ...) {
   if (!self) return;
 
   self->done = xTRUE;
@@ -483,9 +483,9 @@ void xoptions_done(xoptions self,
   }
 
   if (error_fmt && print_help == xTRUE) {
-    xoptions_helper_printf_advance(self, xFALSE, xFALSE, NULL);
+    xoption_helper_printf_advance(self, xFALSE, xFALSE, NULL);
   } else if (print_help == xTRUE) {
-    xoptions_helper_printf_advance(self, xTRUE, xTRUE, NULL);
+    xoption_helper_printf_advance(self, xTRUE, xTRUE, NULL);
   }
 }
 
@@ -496,7 +496,7 @@ static void __print_options(const xlist options) {
   size_t max_len = 0;
 
   xlist_foreach(options, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
     size_t candidate_len = strlen(candidate->ln) +
                            (candidate->sn != '\0' ? 1 : 0) +
                            strlen(candidate->hint);
@@ -505,7 +505,7 @@ static void __print_options(const xlist options) {
 
   printf("Options:\n");
   xlist_foreach(options, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
 
     __candidate_print(candidate, max_len, "  ", "  ");
   }
@@ -520,7 +520,7 @@ static void __print_commands(const xlist commands) {
   size_t max_len = 0;
 
   xlist_foreach(commands, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
     if (!candidate->subcommand) continue;
 
     size_t candidate_len = strlen(candidate->subcommand->name);
@@ -529,7 +529,7 @@ static void __print_commands(const xlist commands) {
 
   printf("Commands:\n");
   xlist_foreach(commands, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
     if (!candidate->subcommand) continue;
 
     printf("  %s  %s\n", candidate->subcommand->name, candidate->desc);
@@ -538,11 +538,11 @@ static void __print_commands(const xlist commands) {
   printf("\n");
 }
 
-void xoptions_helper_printf_advance(xoptions self,
-                                    xbool_t whether_print_prefix,
-                                    xbool_t whether_print_suffix,
-                                    const char* prompt_fmt,
-                                    ...) {
+void xoption_helper_printf_advance(xoption self,
+                                   xbool_t whether_print_prefix,
+                                   xbool_t whether_print_suffix,
+                                   const char* prompt_fmt,
+                                   ...) {
   if (!self) return;
 
   if (prompt_fmt) {
@@ -559,8 +559,8 @@ void xoptions_helper_printf_advance(xoptions self,
   assert(options && commands);
 
   xlist_foreach(&self->candidates, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
-    if (candidate->type == XOPTIONS_CANDIDATE_TYPE_SUBCOMMAND) {
+    xoption_candidate candidate = (xoption_candidate)item;
+    if (candidate->type == xoption_CANDIDATE_TYPE_SUBCOMMAND) {
       xlist_push_back(commands, candidate);
     } else {
       xlist_push_back(options, candidate);
@@ -593,21 +593,21 @@ void xoptions_helper_printf_advance(xoptions self,
   xlist_destroy(commands);
 }
 
-xlist xoptions_get_positional(xoptions self) {
+xlist xoption_get_positional(xoption self) {
   if (!self) return NULL;
   return &self->positional_args;
 }
 
-xoptions_candidate xoptions_add_string(xoptions self,
-                                       char sn,
-                                       const char* ln,
-                                       const char* hint,
-                                       const char* desc,
-                                       char** ptr,
-                                       xbool_t required) {
-  xoptions_candidate c = __candidate_new();
+xoption_candidate xoption_add_string(xoption self,
+                                     char sn,
+                                     const char* ln,
+                                     const char* hint,
+                                     const char* desc,
+                                     char** ptr,
+                                     xbool_t required) {
+  xoption_candidate c = __candidate_new();
   if (!c) return NULL;
-  c->type = XOPTIONS_CANDIDATE_TYPE_STRING;
+  c->type = xoption_CANDIDATE_TYPE_STRING;
   c->sn = sn;
   c->ln = ln;
   c->hint = hint;
@@ -618,16 +618,16 @@ xoptions_candidate xoptions_add_string(xoptions self,
   xlist_push_back(&self->candidates, c);
   return c;
 }
-xoptions_candidate xoptions_add_number(xoptions self,
-                                       char sn,
-                                       const char* ln,
-                                       const char* hint,
-                                       const char* desc,
-                                       int* ptr,
-                                       xbool_t required) {
-  xoptions_candidate c = __candidate_new();
+xoption_candidate xoption_add_number(xoption self,
+                                     char sn,
+                                     const char* ln,
+                                     const char* hint,
+                                     const char* desc,
+                                     int* ptr,
+                                     xbool_t required) {
+  xoption_candidate c = __candidate_new();
   if (!c) return NULL;
-  c->type = XOPTIONS_CANDIDATE_TYPE_NUMBER;
+  c->type = xoption_CANDIDATE_TYPE_NUMBER;
   c->sn = sn;
   c->ln = ln;
   c->hint = hint;
@@ -638,11 +638,11 @@ xoptions_candidate xoptions_add_number(xoptions self,
   xlist_push_back(&self->candidates, c);
   return c;
 }
-xoptions_candidate xoptions_add_boolean(
-    xoptions self, char sn, const char* ln, const char* desc, xbool_t* ptr) {
-  xoptions_candidate c = __candidate_new();
+xoption_candidate xoption_add_boolean(
+    xoption self, char sn, const char* ln, const char* desc, xbool_t* ptr) {
+  xoption_candidate c = __candidate_new();
   if (!c) return NULL;
-  c->type = XOPTIONS_CANDIDATE_TYPE_BOOLEAN;
+  c->type = xoption_CANDIDATE_TYPE_BOOLEAN;
   c->sn = sn;
   c->ln = ln;
   c->desc = desc;
@@ -652,15 +652,15 @@ xoptions_candidate xoptions_add_boolean(
   xlist_push_back(&self->candidates, c);
   return c;
 }
-xoptions_candidate xoptions_add_action(xoptions self,
-                                       char sn,
-                                       const char* ln,
-                                       const char* desc,
-                                       xoptions_action_fn fn,
-                                       void* user_data) {
-  xoptions_candidate c = __candidate_new();
+xoption_candidate xoption_add_action(xoption self,
+                                     char sn,
+                                     const char* ln,
+                                     const char* desc,
+                                     xoption_action_fn fn,
+                                     void* user_data) {
+  xoption_candidate c = __candidate_new();
   if (!c) return NULL;
-  c->type = XOPTIONS_CANDIDATE_TYPE_ACTION;
+  c->type = xoption_CANDIDATE_TYPE_ACTION;
   c->sn = sn;
   c->ln = ln;
   c->desc = desc;
@@ -672,7 +672,7 @@ xoptions_candidate xoptions_add_action(xoptions self,
   return c;
 }
 
-xbool_t xoptions_candidate_is_used(xoptions_candidate self) {
+xbool_t xoption_candidate_is_used(xoption_candidate self) {
   if (!self) return xFALSE;
   return self->used;
 }
@@ -715,41 +715,41 @@ static err_t __atoi(const char* value, int* out) {
   return X_RET_OK;
 }
 
-static err_t __candidate_assignment(xoptions_candidate self,
+static err_t __candidate_assignment(xoption_candidate self,
                                     const char* next,
                                     int* argv_index,
                                     xbool_t is_inline_arg) {
   self->used = xTRUE;
 
-  if (self->type == XOPTIONS_CANDIDATE_TYPE_NUMBER)
+  if (self->type == xoption_CANDIDATE_TYPE_NUMBER)
     return __candidate_assignment_number(self, next, argv_index, is_inline_arg);
-  else if (self->type == XOPTIONS_CANDIDATE_TYPE_BOOLEAN)
+  else if (self->type == xoption_CANDIDATE_TYPE_BOOLEAN)
     return __candidate_assignment_boolean(self,
                                           next,
                                           argv_index,
                                           is_inline_arg);
-  else if (self->type == XOPTIONS_CANDIDATE_TYPE_STRING)
+  else if (self->type == xoption_CANDIDATE_TYPE_STRING)
     return __candidate_assignment_string(self, next, argv_index, is_inline_arg);
-  else if (self->type == XOPTIONS_CANDIDATE_TYPE_ACTION)
+  else if (self->type == xoption_CANDIDATE_TYPE_ACTION)
     return __candidate_assignment_action(self, next);
 
   return X_RET_OK;
 }
 
-static err_t __candidate_assignment_number(xoptions_candidate self,
+static err_t __candidate_assignment_number(xoption_candidate self,
                                            const char* next,
                                            int* argv_index,
                                            xbool_t is_inline_arg) {
   err_t err = __atoi(next, (int*)self->storing_ptr);
   if (err != X_RET_OK) {
-    xoptions_done(self->context,
-                  xTRUE,
-                  "error: invalid number value '%s' for option '[-%c | --%s]'"
-                  "(%s)\n\n",
-                  next ? next : "",
-                  self->sn,
-                  self->ln,
-                  err_str(err));
+    xoption_done(self->context,
+                 xTRUE,
+                 "error: invalid number value '%s' for option '[-%c | --%s]'"
+                 "(%s)\n\n",
+                 next ? next : "",
+                 self->sn,
+                 self->ln,
+                 err_str(err));
   }
 
   // use next argument as value
@@ -757,7 +757,7 @@ static err_t __candidate_assignment_number(xoptions_candidate self,
 
   return err;
 }
-static err_t __candidate_assignment_boolean(xoptions_candidate self,
+static err_t __candidate_assignment_boolean(xoption_candidate self,
                                             const char* next,
                                             int* argv_index,
                                             xbool_t is_inline_arg) {
@@ -782,16 +782,16 @@ static err_t __candidate_assignment_boolean(xoptions_candidate self,
   }
   return X_RET_OK;
 }
-static err_t __candidate_assignment_string(xoptions_candidate self,
+static err_t __candidate_assignment_string(xoption_candidate self,
                                            const char* value,
                                            int* argv_index,
                                            xbool_t is_inline_arg) {
   if (value == NULL) {
-    xoptions_done(self->context,
-                  xTRUE,
-                  "error: missing value for option '[-%c | --%s]'\n\n",
-                  self->sn,
-                  self->ln);
+    xoption_done(self->context,
+                 xTRUE,
+                 "error: missing value for option '[-%c | --%s]'\n\n",
+                 self->sn,
+                 self->ln);
 
     return X_RET_INVAL;
   } else {
@@ -802,7 +802,7 @@ static err_t __candidate_assignment_string(xoptions_candidate self,
 
   return X_RET_OK;
 }
-static err_t __candidate_assignment_action(xoptions_candidate self,
+static err_t __candidate_assignment_action(xoption_candidate self,
                                            const char* value) {
   self->fn(self->context, self->storing_ptr);
   return X_RET_OK;
@@ -840,12 +840,12 @@ static xbool_t __is_positional_separator(const char* name) {
   return xFALSE;
 }
 
-static xoptions_candidate __candidate_new() {
-  xoptions_candidate self = (xoptions_candidate)xbox_malloc(
-      sizeof(struct xoptions_candidate_priv));
+static xoption_candidate __candidate_new() {
+  xoption_candidate self = (xoption_candidate)xbox_malloc(
+      sizeof(struct xoption_candidate_priv));
   if (!self) return NULL;
 
-  self->type = XOPTIONS_CANDIDATE_TYPE_END;
+  self->type = xoption_CANDIDATE_TYPE_END;
   self->sn = '\0';
   self->ln = "";
   self->hint = "";
@@ -859,15 +859,15 @@ static xoptions_candidate __candidate_new() {
   return self;
 }
 
-static void __candidate_free(xoptions_candidate self) {
+static void __candidate_free(xoption_candidate self) {
   if (!self) return;
 
-  if (self->subcommand) xoptions_destroy(self->subcommand);
+  if (self->subcommand) xoption_destroy(self->subcommand);
 
   xbox_free(self);
 }
 
-static void __candidate_print(xoptions_candidate self,
+static void __candidate_print(xoption_candidate self,
                               size_t left_width,
                               const char* front_padding,
                               const char* back_padding) {
@@ -914,34 +914,34 @@ static void __candidate_print(xoptions_candidate self,
   printf("%s\n", buf);
 }
 
-static void __xoptions_default_helper_action(xoptions self, void* user_data) {
-  xoptions_done(self, xTRUE, NULL);
+static void __xoption_default_helper_action(xoption self, void* user_data) {
+  xoption_done(self, xTRUE, NULL);
   xbox_exit(0);
 }
 
-static void __xoptions_check_required(xoptions self) {
+static void __xoption_check_required(xoption self) {
   if (!self) return;
 
   void* item;
   xlist_foreach(&self->candidates, item) {
-    xoptions_candidate candidate = (xoptions_candidate)item;
+    xoption_candidate candidate = (xoption_candidate)item;
     if (candidate->required == xTRUE && candidate->used == xFALSE) {
       if (candidate->sn != '\0' && strlen(candidate->ln) > 0) {
-        xoptions_done(self,
-                      xTRUE,
-                      "error: missing required option '-%c' / '--%s'\n\n",
-                      candidate->sn,
-                      candidate->ln);
+        xoption_done(self,
+                     xTRUE,
+                     "error: missing required option '-%c' / '--%s'\n\n",
+                     candidate->sn,
+                     candidate->ln);
       } else if (strlen(candidate->ln) > 0) {
-        xoptions_done(self,
-                      xTRUE,
-                      "error: missing required option '--%s'\n\n",
-                      candidate->ln);
+        xoption_done(self,
+                     xTRUE,
+                     "error: missing required option '--%s'\n\n",
+                     candidate->ln);
       } else if (candidate->sn != '\0') {
-        xoptions_done(self,
-                      xTRUE,
-                      "error: missing required option '-%c'\n\n",
-                      candidate->sn);
+        xoption_done(self,
+                     xTRUE,
+                     "error: missing required option '-%c'\n\n",
+                     candidate->sn);
       }
     }
   }

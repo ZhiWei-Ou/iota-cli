@@ -24,9 +24,9 @@ extern "C" {
 #define INACTIVE_PARTITION_MOUNT_POINT "/mnt/inactive_partition"
 
 #include "xstring.h"
-#include "xoptions.h"
+#include "xoption.h"
 
-err_t checkout_usage_init(xoptions root);
+err_t checkout_usage_init(xoption root);
 
 xstring get_inactive_partition(void);
 xstring get_active_partition(void);

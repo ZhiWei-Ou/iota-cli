@@ -1,48 +1,28 @@
-# IOTAD
+# IOTA Firmware Management Tool
+`iota-cli` is a command-line tool designed for managing firmware on Linux devices. It supports operations such as checking out the current firmware and updating to a new firmware version.
+
+# Usage
+
+## checkout partitions
+To checkout the current firmware partitions, use the following command:
 
 ```bash
-iota
- | - -V, --verbose              Enable verbose output
- | - -v, --version           Show the version information
- | - checkout
-      |- -x, --script <script.sh>  Execute a custom script after checkout
-      |- --reboot             Reboot the system after checkout
- | - update
-      |- -i，--image <firmware.iota> Update the device firmware with the specified image
-      |- --skip-checksum    Skip checksum verification during the update process
-      |- --reboot      Reboot the system after the update
+# checkout the partition. The change will take effect after the next startup
+iota-cli checkout
+
+# checkout the partition and reboot immediately
+iota-cli checkout --reboot --delay 0
 ```
 
-```iota
-    [ firmwares... ]
-        ↓ archive
-    [ firmware.tar ]
-        ↓ compress
-    [ firmware.tar.gz ] 
-        ↓ sign -> firmware.sig
-    [ firmware.tar.gz ]
-        ↓ encrypt (AES-GCM)
-    [ firmware.enc ] 
-        ↓ header
-    [ firmware.iota ]
+## upgrade firmware
+To upgrade the firmware to a new version, use the following command:
 
-Header:
-    - Magic Number (4 bytes) "IOTA"
-    - DateTime (20 bytes) "YYYY-MM-DD HH:MM:SS"
-    - Total Size (4 bytes)
-    - IV (12 bytes)
-    - Signature (256 bytes) ""
-    - Reserved (12 bytes)
-
-Workflow:
-    Read Header
-       ↓
-    Decrypt firmware.enc
-       ↓
-    Obtain firmware.tar.gz
-       ↓
-    Verify Signature (header.signature vs firmware.tar.gz)
-       ↓
-    Pass? → Extract & Upgrade
-    Fail? → Abort
+```bash
+iota-cli upgrade \
+    --image "$FIRMWARE_FILE" \
+    --key "$HEX_KEY_STRING" \
+    --verify "$PUBLIC_KEY_FILE" \
+    --stream-count 51200 \
+    --no-progress \
+    --enable-dbus
 ```

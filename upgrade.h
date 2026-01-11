@@ -18,9 +18,9 @@
 extern "C" {
 #endif /* __cplusplus */
 
-#include "xoptions.h"
+#include "xoption.h"
 
-err_t upgrade_usage_init(xoptions root);
+err_t upgrade_usage_init(xoption root);
 
 #ifdef __cplusplus
 }

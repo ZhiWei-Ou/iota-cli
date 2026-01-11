@@ -1,11 +1,9 @@
 #define XLOG_MOD "checkout"
-#include "main.h"
 #include "checkout.h"
 #include "os_file.h"
 #include "xlog.h"
 #include "exec.h"
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -13,20 +11,18 @@ static char *specified_script = NULL;
 static xbool_t force = xFALSE;
 static xbool_t need_reboot = xFALSE;
 static int reboot_delay_second = 3;
-static int checkout_feature_entry();
-static void use_checkout_feature(xoptions context)
-{  register_feature_function(checkout_feature_entry);  }
+static err_t checkout_feature_entry();
 
-err_t checkout_usage_init(xoptions root) {
+err_t checkout_usage_init(xoption root) {
     if (!root)
         return X_RET_INVAL;
 
-    xoptions checkout = xoptions_create_subcommand(root, "checkout", "Select another partition for the next boot.");
-    xoptions_set_posthook(checkout, use_checkout_feature);
-    xoptions_add_string(checkout, 'x', "script", "<script.sh>", "Custom shell script to run after the partition switch", &specified_script, xFALSE);
-    xoptions_add_boolean(checkout, '\0', "reboot", "Automatically restart the system after a successful checkout", &need_reboot); 
-    xoptions_add_number(checkout, '\0', "delay", "<seconds>", "Time to wait (in seconds) before performing the reboot", &reboot_delay_second, xFALSE);
-    xoptions_add_boolean(checkout, 'f', "force", "Force the checkout even if the target partition is already active", &force);
+    xoption checkout = xoption_create_subcommand(root, "checkout", "Select another partition for the next boot.");
+    xoption_set_post_parse_callback(checkout, checkout_feature_entry);
+    xoption_add_string(checkout, 'x', "script", "<script.sh>", "Custom shell script to run after the partition switch", &specified_script, xFALSE);
+    xoption_add_boolean(checkout, '\0', "reboot", "Automatically restart the system after a successful checkout", &need_reboot); 
+    xoption_add_number(checkout, '\0', "delay", "<seconds>", "Time to wait (in seconds) before performing the reboot", &reboot_delay_second, xFALSE);
+    xoption_add_boolean(checkout, 'f', "force", "Force the checkout even if the target partition is already active", &force);
 
     return X_RET_OK;
 }
@@ -126,7 +122,7 @@ int checkout(const char *part) {
     return 0;
 }
 
-int checkout_feature_entry() {
+err_t checkout_feature_entry() {
     assert_requirements();
 
     // Get current rootfs partition from rootfs mount
@@ -134,14 +130,14 @@ int checkout_feature_entry() {
     if (!exec_success(current_rootfs_part)) {
         XLOG_D("mount output: %s", exec_output(current_rootfs_part));
         XLOG_E("Failed to get current rootfs mount info.");
-        return -1;
+        return X_RET_ERROR;
     }
 
     // Get current boot partition from U-Boot env
     exec_t current_env_part = exec_command("fw_printenv -n " UBOOTENV_VAR_ROOTFS_PART);
     if (!exec_success(current_env_part)) {
         XLOG_E("Failed to get current rootfs_root. output: %s", exec_output(current_env_part));
-        return -1;
+        return X_RET_ERROR;
     }
 
     // Remove whitespace and breaklines
@@ -281,7 +277,6 @@ err_t mount_inactive_partition(void) {
     xstring_free(&cmd);
     xstring_free(&inactive_part);
     if (!exec_success(r)) {
-        XLOG_E("Failed to mount inactive partition. output: %s", exec_output(r));
         exec_free(r);
         return X_RET_ERROR;
     }

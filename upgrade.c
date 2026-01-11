@@ -1,5 +1,4 @@
 #define XLOG_MOD "upgrade"
-#include "main.h"
 #include "exec.h"
 #include "upgrade.h"
 #include "os_file.h"
@@ -47,9 +46,7 @@ typedef struct {
 } image_header_t;
 #pragma pack(pop)
 
-static int upgrade_feature_entry();
-static void use_upgrade_feature(xoptions context)
-{ register_feature_function(upgrade_feature_entry); }
+static err_t upgrade_feature_entry();
 static int hexchar_to_int(char c);
 static err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len);
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
@@ -85,21 +82,21 @@ static void XLOG_WAITING(const char *message);
     } \
 } while(0)
 
-err_t upgrade_usage_init(xoptions root) {
+err_t upgrade_usage_init(xoption root) {
     if (!root)
         return X_RET_INVAL;
 
-    xoptions upgrade = xoptions_create_subcommand(root, "upgrade", "Perform a system firmware upgrade.");
-    xoptions_set_posthook(upgrade, use_upgrade_feature);
-    xoptions_add_string(upgrade, 'i', "image", "<firmware.iota>", "Path to the firmware image file (.iota)", &firmware_path, xTRUE);
-    // xoptions_add_boolean(upgrade, '\0', "skip-auth", "Bypass authentication tag validation (insecure)", &skip_firmware_auth);
-    xoptions_add_boolean(upgrade, '\0', "skip-verify", "Bypass digital signature verification (insecure)", &skip_firmware_verify);
-    xoptions_add_number(upgrade, 's', "stream-count", "<count>", "Number of bytes per data chunk for streaming decryption and verification", &stream_count, xFALSE);
-    xoptions_add_string(upgrade, '\0', "verify", "<public_key.pem>", "Path to the public key PEM file for signature validation", &key_path, xFALSE);
-    xoptions_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
-    xoptions_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
-    xoptions_add_string(upgrade, 'k', "key", "<hexkey>", "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.", &hexkey, xFALSE);
-    xoptions_add_boolean(upgrade, '\0', "enable-dbus", "Use D-Bus to notify event", &enable_dbus);
+    xoption upgrade = xoption_create_subcommand(root, "upgrade", "Perform a system firmware upgrade.");
+    xoption_set_post_parse_callback(upgrade, upgrade_feature_entry);
+    xoption_add_string(upgrade, 'i', "image", "<firmware.iota>", "Path to the firmware image file (.iota)", &firmware_path, xTRUE);
+    // xoption_add_boolean(upgrade, '\0', "skip-auth", "Bypass authentication tag validation (insecure)", &skip_firmware_auth);
+    xoption_add_boolean(upgrade, '\0', "skip-verify", "Bypass digital signature verification (insecure)", &skip_firmware_verify);
+    xoption_add_number(upgrade, 's', "stream-count", "<count>", "Number of bytes per data chunk for streaming decryption and verification", &stream_count, xFALSE);
+    xoption_add_string(upgrade, '\0', "verify", "<public_key.pem>", "Path to the public key PEM file for signature validation", &key_path, xFALSE);
+    xoption_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
+    xoption_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
+    xoption_add_string(upgrade, 'k', "key", "<hexkey>", "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.", &hexkey, xFALSE);
+    xoption_add_boolean(upgrade, '\0', "enable-dbus", "Use D-Bus to notify event", &enable_dbus);
 
     return X_RET_OK;
 }
@@ -137,7 +134,7 @@ static void on_cleanup(int status, void *arg) {
     cleanup_temporary_resources();
 }
 
-int upgrade_feature_entry() {
+err_t upgrade_feature_entry() {
     on_exit(on_cleanup, NULL);
 
     if (!firmware_path) {
