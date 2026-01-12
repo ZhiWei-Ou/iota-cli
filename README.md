@@ -19,7 +19,7 @@ To upgrade the firmware to a new version, use the following command:
 
 ```bash
 iota-cli upgrade \
-    --image "$FIRMWARE_FILE" \
+    --firmware "$FIRMWARE_FILE" \
     --key "$HEX_KEY_STRING" \
     --verify "$PUBLIC_KEY_FILE" \
     --stream-count 51200 \
