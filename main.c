@@ -10,6 +10,7 @@
 
 static void sigint_handler(int sig);
 static void show_version(xoption context, void* user_data);
+static void show_full_version(xoption context, void* user_data);
 
 int main(int argc, char** argv){
     signal(SIGINT, sigint_handler);
@@ -18,7 +19,8 @@ int main(int argc, char** argv){
     xoption_set_prefix_prompt(root, CLI_PROMPT);
 
     // Add global flag
-    xoption_add_action(root, 'v', "version", "Show version information.", show_version, NULL);
+    xoption_add_action(root, 'v', "", "Show version information.", show_version, NULL);
+    xoption_add_action(root, '\0', "version", "Show full version information.", show_full_version, NULL);
 
     // Add subcommand
     checkout_usage_init(root);
@@ -35,6 +37,12 @@ void sigint_handler(int sig) {
 }
 
 void show_version(xoption context, void* user_data) {
+    printf("%d.%d.%d-%s\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, GIT_DESCRIBE);
+
+    xoption_done(context, xFALSE, NULL);
+}
+
+void show_full_version(xoption context, void* user_data) {
     printf("IOTA Version %d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
     printf("Git Branch:       %s\n", GIT_BRANCH);
     printf("Git Commit Hash:  %s\n", GIT_COMMIT_HASH);
