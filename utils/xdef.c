@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define STB_SPRINTF_NOUNALIGNED
+#define STB_SPRINTF_IMPLEMENTATION
+#include "stb_sprintf.h"
+
 #ifdef XBOX_ENABLE_XJSON
 #include "xjson.h"
 #endif

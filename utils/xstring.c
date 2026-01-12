@@ -11,9 +11,10 @@
 #include "xstring.h"
 
 #include <ctype.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "stb_sprintf.h"
 
 static const char* xstring_double_expand_with_minimum(xstring* s, size_t min) {
   const char* h = s->s;
@@ -131,7 +132,7 @@ void xstring_init_vformat_r(xstring* s, const char* fmt, va_list ap) {
 
   va_list ap_copy;
   va_copy(ap_copy, ap);
-  int len = vsnprintf(NULL, 0, fmt, ap_copy);
+  int len = stbsp_vsnprintf(NULL, 0, fmt, ap_copy);
   va_end(ap_copy);
   if (len < 0) {
     return;
@@ -147,7 +148,7 @@ void xstring_init_vformat_r(xstring* s, const char* fmt, va_list ap) {
     s->cap = len + 1;
   }
 
-  s->len = vsnprintf(p, s->cap, fmt, ap);
+  s->len = stbsp_vsnprintf(p, s->cap, fmt, ap);
 }
 
 void xstring_free(xstring* s) {

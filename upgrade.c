@@ -630,6 +630,8 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
                 processed_size += size;
 
                 XLOG_P("Unpacking&Installing", xstring_to_string(&postfix), processed_size, total_size);
+
+                usleep(1000);
             }
         }
     }

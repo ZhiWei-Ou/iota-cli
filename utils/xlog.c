@@ -14,8 +14,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <strings.h>
+
+#include "stb_sprintf.h"
 
 struct xlog_sink_private {
   void* ctx;                         /* sink context */
@@ -426,8 +426,9 @@ xlog_message_t xlog_message_init(const char* module,
                                  xlog_lvl_e lvl,
                                  const char* format,
                                  ...) {
-  va_list ap;
+  va_list ap, ap_copy;
   va_start(ap, format);
+  va_copy(ap_copy, ap);
   xlog_message_t message = {
       .module = module,
       .full_file_name = file,
@@ -435,11 +436,25 @@ xlog_message_t xlog_message_init(const char* module,
       .func = func,
       .line = line,
       .lvl = lvl,
-      .data = xstring_init_empty(),
+      .data =
+          {
+              .b = {0},
+              .s = NULL,
+          },
       .need_free = xFALSE,
   };
 
-  xstring_init_vformat_r(&(message.data), format, ap);
+  int need_len = stbsp_vsnprintf(NULL, 0, format, ap_copy) + 1;  // reserve '\0'
+  va_end(ap_copy);
+
+  if (need_len > XLOG_SBO_SIZE) {
+    message.data.s = xbox_malloc(need_len);
+    assert(message.data.s != NULL);
+    stbsp_vsnprintf(message.data.s, need_len, format, ap);
+  } else {
+    stbsp_vsnprintf(message.data.b, XLOG_SBO_SIZE, format, ap);
+  }
+
   va_end(ap);
 
   return message;
@@ -457,9 +472,16 @@ xlog_message_t* xlog_message_dup(const xlog_message_t* other) {
   message->func = other->func;
   message->line = other->line;
   message->lvl = other->lvl;
-  message->data = xstring_init_empty();
+  memset(&message->data.b, 0, XLOG_SBO_SIZE);
+  message->data.s = NULL;
   message->need_free = xTRUE;
-  xstring_init_from_other_r(&message->data, &other->data);
+
+  if (other->data.s) {
+    message->data.s = xbox_strdup(other->data.s);
+    assert(message->data.s != NULL);
+  } else {
+    memcpy(message->data.b, other->data.b, XLOG_SBO_SIZE);
+  }
 
   return message;
 }
@@ -467,7 +489,10 @@ xlog_message_t* xlog_message_dup(const xlog_message_t* other) {
 err_t xlog_message_release(xlog_message_t* message) {
   if (message == NULL) return X_RET_INVAL;
 
-  xstring_free(&message->data);
+  if (message->data.s) {
+    xbox_free(message->data.s);
+    message->data.s = NULL;
+  }
 
   if (message->need_free) xbox_free(message);
 
@@ -537,11 +562,11 @@ static inline uint64_t __now_ns(void) {
 void xlog_default_output(xlogger lgr,
                          xlog_sink s,
                          const xlog_message_t* const msg) {
-  // uint64_t ns = __now_ns();
-  // time_t sec = ns / 1000000000ull;
-  // int ms = (int)((ns / 1000000ull) % 1000);
-  // struct tm tm;
-  // localtime_r(&sec, &tm);
+  uint64_t ns = __now_ns();
+  time_t sec = ns / 1000000000ull;
+  int ms = (int)((ns / 1000000ull) % 1000);
+  struct tm tm;
+  localtime_r(&sec, &tm);
 
   static const char* lvl_color[] = {
       [XLOG_LVL_TRACE] = "\x1b[36m",
@@ -553,9 +578,19 @@ void xlog_default_output(xlogger lgr,
   };
 
   fprintf(stderr,
-          "%s[%s]\x1b[0m %s\n",
+          "%s[%d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s[%s:%d] %s\x1b[0m\n",
           lvl_color[msg->lvl],
+          tm.tm_year + 1900,
+          tm.tm_mon + 1,
+          tm.tm_mday,
+          tm.tm_hour,
+          tm.tm_min,
+          tm.tm_sec,
+          ms,
           xlog_lvl_str(msg->lvl),
+          lvl_color[msg->lvl],
+          xlog_message_file(msg),
+          xlog_message_line(msg),
           xlog_message_data(msg));
 }
 

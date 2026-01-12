@@ -5,6 +5,7 @@ set(PROJECT_NAME "iota-cli")
 
 project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES C)
 
+set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(OpenSSL REQUIRED)

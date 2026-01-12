@@ -11,8 +11,12 @@
 #ifndef XTOOL_XLOG__H_
 #define XTOOL_XLOG__H_
 
+#include <string.h>
+
 #include "xdef.h"
-#include "xstring.h"
+
+/**< Size of the small buffer optimization for log messages. */
+#define XLOG_SBO_SIZE (128)
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,13 +97,12 @@ extern "C" {
  * @brief Defines the various levels of logging.
  */
 typedef enum {
-  XLOG_LVL_TRACE, /**< Trace level, for detailed debugging. */
-  XLOG_LVL_DEBUG, /**< Debug level, for development-time messages. */
-  XLOG_LVL_INFO,  /**< Info level, for informational messages. */
-  XLOG_LVL_WARN,  /**< Warn level, for potential issues. */
-  XLOG_LVL_ERROR, /**< Error level, for recoverable errors. */
-  XLOG_LVL_FATAL, /**< Fatal level, for unrecoverable errors that may terminate
-                     the application. */
+  XLOG_LVL_TRACE, /**< Trace level */
+  XLOG_LVL_DEBUG, /**< Debug level */
+  XLOG_LVL_INFO,  /**< Info level */
+  XLOG_LVL_WARN,  /**< Warn level */
+  XLOG_LVL_ERROR, /**< Error level */
+  XLOG_LVL_FATAL, /**< Fatal level */
 } xlog_lvl_e;
 
 /**
@@ -149,7 +152,10 @@ typedef struct {
   const char* func;             /**< Caller function name. */
   int         line;             /**< Caller line number. */
   xlog_lvl_e  lvl;              /**< Log level. */
-  xstring     data;             /**< Formatted log message. */
+  struct {
+        char b[XLOG_SBO_SIZE];  /**< Inline buffer for small messages. */
+        char* s;                /**< Pointer to dynamically allocated buffer if needed. */
+  } data;                       /**< The formatted log message data. */
   xbool_t     need_free;        /**< Whether the `data` field needs to be freed. */
 } xlog_message_t;
 // clang-format on
@@ -159,10 +165,14 @@ typedef struct {
  * @def XLOG_MESSAGE_MACRO_INIT
  * @brief Internal macro to initialize a log message struct from the call site.
  */
-// clang-format off
 #define XLOG_MESSAGE_MACRO_INIT(lvl, fmt, ...) \
-    xlog_message_init(XLOG_MOD,__FILE__,__func__,__LINE__,lvl,fmt,##__VA_ARGS__)
-// clang-format on
+  xlog_message_init(XLOG_MOD,                  \
+                    __FILE__,                  \
+                    __func__,                  \
+                    __LINE__,                  \
+                    lvl,                       \
+                    fmt,                       \
+                    ##__VA_ARGS__)
 
 /**
  * @brief Initializes a log message struct with metadata and formatted message.
@@ -204,20 +214,13 @@ xlog_message_t* xlog_message_move(xlog_message_t* other);
 err_t xlog_message_release(xlog_message_t* message);
 
 // clang-format off
-static inline const char* xlog_message_data(const xlog_message_t* message)
-{ return xstring_to_string(&message->data); }
-static inline size_t xlog_message_length(const xlog_message_t* message)
-{ return xstring_length(&message->data); }
-static inline const char* xlog_message_module(const xlog_message_t* message)
-{ return message->module; }
-static inline const char* xlog_message_function(const xlog_message_t* message)
-{ return message->func; }
-static inline const char* xlog_message_file(const xlog_message_t* message)
-{ return message->file_name; }
-static inline const char* xlog_message_full_file(const xlog_message_t* message)
-{ return message->full_file_name; }
-static inline int xlog_message_line(const xlog_message_t* message)
-{ return message->line; }
+static inline const char* xlog_message_data(const xlog_message_t* message) { return message->data.s ? message->data.s : message->data.b; }
+static inline size_t xlog_message_length(const xlog_message_t* message) { return strlen(xlog_message_data(message)); }
+static inline const char* xlog_message_module(const xlog_message_t* message) { return message->module; }
+static inline const char* xlog_message_function(const xlog_message_t* message) { return message->func; }
+static inline const char* xlog_message_file(const xlog_message_t* message) { return message->file_name; }
+static inline const char* xlog_message_full_file(const xlog_message_t* message) { return message->full_file_name; }
+static inline int xlog_message_line(const xlog_message_t* message) { return message->line; }
 // clang-format on
 /** @} */
 

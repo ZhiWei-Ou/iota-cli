@@ -308,7 +308,7 @@ err_t unmount_inactive_partition(void) {
 
     // Change directory to avoid "device is busy" error
     chdir("/");
-    xstring cmd = xstring_init_format("sync && umount %s && rmdir %s",
+    xstring cmd = xstring_init_format("sync && sleep 1 && umount %s && rmdir %s",
                                       INACTIVE_PARTITION_MOUNT_POINT, INACTIVE_PARTITION_MOUNT_POINT);
     exec_t r = exec_command(xstring_to_string(&cmd));
     if (!exec_success(r)) {
