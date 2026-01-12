@@ -62,3 +62,4 @@ firmware*
 compile_commands.json
 .DS_Store
 TODO.md
+version.h

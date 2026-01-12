@@ -35,7 +35,14 @@ void sigint_handler(int sig) {
 }
 
 void show_version(xoption context, void* user_data) {
-    printf("%s\n", get_version());
+    printf("IOTA Version %d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+    printf("Git Branch:       %s\n", GIT_BRANCH);
+    printf("Git Commit Hash:  %s\n", GIT_COMMIT_HASH);
+    printf("Git Commit Date:  %s\n", GIT_COMMIT_DATE);
+    printf("Git Describe:     %s\n", GIT_DESCRIBE);
+    printf("Build Time:       %s\n", BUILD_TIME);
+    printf("Build Type:       %s\n", BUILD_TYPE);
+
     xoption_done(context, xFALSE, NULL);
 }
 
