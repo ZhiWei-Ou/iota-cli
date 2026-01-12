@@ -3,43 +3,57 @@
 #include "os_file.h"
 #include "xlog.h"
 #include "exec.h"
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static char *specified_script = NULL;
-static xbool_t force = xFALSE;
-static xbool_t need_reboot = xFALSE;
-static int reboot_delay_second = 3;
-static err_t checkout_feature_entry();
+typedef struct {
+    xoption this_option;
+    struct {
+        char *specified_script;
+        xbool_t force;
+        xbool_t need_reboot;
+        int reboot_delay_second;
+    } flags;
+} checkout_context_t;
+
+static checkout_context_t g_checkout_ctx = {
+    .this_option = NULL,
+    .flags = {
+        .specified_script = NULL,
+        .force = xFALSE,
+        .need_reboot = xFALSE,
+        .reboot_delay_second = 3,
+    },
+};
 
 err_t checkout_usage_init(xoption root) {
     if (!root)
         return X_RET_INVAL;
 
+    if (g_checkout_ctx.this_option)
+        return X_RET_OK;
+
+    extern err_t checkout_feature_entry(xoption self);
+
     xoption checkout = xoption_create_subcommand(root, "checkout", "Select another partition for the next boot.");
+    xoption_set_context(checkout, &g_checkout_ctx);
     xoption_set_post_parse_callback(checkout, checkout_feature_entry);
-    xoption_add_string(checkout, 'x', "script", "<script.sh>", "Custom shell script to run after the partition switch", &specified_script, xFALSE);
-    xoption_add_boolean(checkout, '\0', "reboot", "Automatically restart the system after a successful checkout", &need_reboot); 
-    xoption_add_number(checkout, '\0', "delay", "<seconds>", "Time to wait (in seconds) before performing the reboot", &reboot_delay_second, xFALSE);
-    xoption_add_boolean(checkout, 'f', "force", "Force the checkout even if the target partition is already active", &force);
+    xoption_add_string(checkout, 'x', "script", "<script.sh>",
+                       "Custom shell script to run after the partition switch",
+                       &g_checkout_ctx.flags.specified_script, xFALSE);
+    xoption_add_boolean(checkout, '\0', "reboot",
+                        "Automatically restart the system after a successful checkout",
+                        &g_checkout_ctx.flags.need_reboot); 
+    xoption_add_number(checkout, '\0', "delay", "<seconds>",
+                       "Time to wait (in seconds) before performing the reboot",
+                       &g_checkout_ctx.flags.reboot_delay_second, xFALSE);
+    xoption_add_boolean(checkout, 'f', "force",
+                        "Force the checkout even if the target partition is already active",
+                        &g_checkout_ctx.flags.force);
+
+    g_checkout_ctx.this_option = checkout;
 
     return X_RET_OK;
-}
-
-static void assert_command(const char *cmd) {
-#ifdef __APPLE__
-#else
-    xstring c = xstring_init_format("which %s", cmd);
-    exec_t r = exec_command(xstring_to_string(&c));
-    if (!exec_success(r)) {
-        XLOG_E("fw_printenv not found in PATH");
-        exit(-1);
-    }
-
-    exec_free(r);
-    xstring_free(&c);
-#endif /* __APPLE__ */
 }
 
 void assert_requirements() {
@@ -51,7 +65,7 @@ void assert_requirements() {
 }
 
 static void run_script_with_check(const char *script) {
-    if (!specified_script)
+    if (script == NULL)
         return;
 
     XLOG_I("Running checkout script: %s", script);
@@ -79,15 +93,16 @@ static void run_script_with_check(const char *script) {
     XLOG_I("Script executed: %s", script);
 }
 
-static void reboot_with_check() {
-    if (!need_reboot) 
+static void reboot_with_check(checkout_context_t *ctx) {
+    if (!ctx->flags.need_reboot) 
         return;
 
-    if (reboot_delay_second <= 0) {
+    int delay = ctx->flags.reboot_delay_second;
+    if (delay <= 0) {
         XLOG_W("Rebooting system immediately...");
     } else {
-        XLOG_W("Rebooting system after %d seconds...", reboot_delay_second);
-        sleep(reboot_delay_second);
+        XLOG_W("Rebooting system after %d seconds...", delay);
+        sleep(delay);
     }
 
     exec_t r = exec_command("reboot");
@@ -98,7 +113,7 @@ static void reboot_with_check() {
     exec_free(r);
 }
 
-int checkout(const char *part) {
+err_t checkout_with_reboot(checkout_context_t *ctx, const char *part) {
     xstring cmd = xstring_init_format("fw_setenv %s %s", UBOOTENV_VAR_ROOTFS_PART, part);
     exec_t r = exec_command(xstring_to_string(&cmd));
     xstring_free(&cmd);
@@ -106,7 +121,7 @@ int checkout(const char *part) {
     if (!exec_success(r)) {
         XLOG_E("Failed to set rootfs_root to '%s'", part);
         exec_free(r);
-        return -1;
+        return X_RET_ERROR;
     }
 
     exec_free(r);
@@ -115,15 +130,21 @@ int checkout(const char *part) {
 
     XLOG_I("Partition switching successful");
 
-    run_script_with_check(specified_script);
+    run_script_with_check(ctx->flags.specified_script);
 
-    reboot_with_check();
+    reboot_with_check(ctx);
 
-    return 0;
+    return X_RET_OK;
 }
 
-err_t checkout_feature_entry() {
+err_t checkout_feature_entry(xoption self) {
     assert_requirements();
+
+    checkout_context_t *ctx = xoption_get_context(self);
+    if (ctx == NULL) {
+        XLOG_E("Invalid checkout context.");
+        return X_RET_INVAL;
+    }
 
     // Get current rootfs partition from rootfs mount
     exec_t current_rootfs_part = exec_command("awk '$2==\"/\" {print $1}' /proc/self/mounts");
@@ -163,13 +184,13 @@ err_t checkout_feature_entry() {
 
         XLOG_W("The checkout partition '%s' is already the active partition.", checkout_part);
 
-        if (!force) {
+        if (!ctx->flags.force) {
             XLOG_W("Skipping checkout. Use --force to override if you really want to checkout to the same partition.");
             return X_RET_EXIST;
         }
     }
 
-    int code = checkout(checkout_part);
+    err_t code = checkout_with_reboot(ctx, checkout_part);
 
     if (code == X_RET_OK) {
         XLOG_I("Successfully checked out to partition: '%s'", checkout_part);
@@ -306,10 +327,10 @@ err_t unmount_inactive_partition(void) {
 
     xstring_free(&inactive_part);
 
-    // Change directory to avoid "device is busy" error
-    chdir("/");
-    xstring cmd = xstring_init_format("sync && sleep 1 && umount %s && rmdir %s",
-                                      INACTIVE_PARTITION_MOUNT_POINT, INACTIVE_PARTITION_MOUNT_POINT);
+    xstring cmd = xstring_init_format("test -d %s || exit 0;sync && umount -l %s && rmdir %s",
+                                      INACTIVE_PARTITION_MOUNT_POINT,
+                                      INACTIVE_PARTITION_MOUNT_POINT,
+                                      INACTIVE_PARTITION_MOUNT_POINT);
     exec_t r = exec_command(xstring_to_string(&cmd));
     if (!exec_success(r)) {
         XLOG_E("Failed to unmount inactive partition. command: `%s`, error code: %d",

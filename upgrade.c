@@ -5,6 +5,8 @@
 #include "checkout.h"
 #include "xlog.h"
 #include "xstring.h"
+#include "notify.h"
+#include "dbus_interfaces.h"
 #include <time.h>
 #include <string.h>
 #include <openssl/evp.h>
@@ -12,8 +14,6 @@
 #include <openssl/err.h>
 #include <archive.h>
 #include <archive_entry.h>
-#include "notify.h"
-#include "dbus_interfaces.h"
 
 #define TEMPORARY_TARGZ_PATH "/tmp/upgrade_firmware.tar.gz"
 #define FIRMWARE_EXTRACTED_DIR "/tmp/firmware_extracted"
@@ -26,15 +26,39 @@
 const uint8_t magic[] = { 'I', 'O', 'T', 'A' };
 const uint8_t default_key[AES_GCM_KEY_LEN] = {0XE9, 0X29, 0X95, 0XAA, 0X05, 0XBD, 0XF2, 0X89, 0XC4, 0X71, 0XDC, 0X7F, 0X5C, 0X13, 0X34, 0XCD};
 
-static char *firmware_path = NULL;
-static char *hexkey = NULL;
-static xbool_t skip_firmware_auth = xFALSE;
-static xbool_t skip_firmware_verify = xFALSE;
-static xbool_t upgrade_in_place = xFALSE;
-static xbool_t dont_print_progress = xFALSE;
-static xbool_t enable_dbus = xFALSE;
-static char *key_path = NULL;
-static int stream_count = 4096;
+typedef struct {
+    xoption this_option;
+    FILE *firmware_fp;
+    FILE *temp_fp;
+    struct archive *ar, *disk;
+    struct {
+        char *firmware_path;
+        char *hexkey;
+        xbool_t skip_firmware_verify;
+        xbool_t upgrade_in_place;
+        xbool_t dont_print_progress;
+        xbool_t enable_dbus;
+        char *key_path;
+        int stream_count;
+     } flags;
+} upgrade_context_t;
+static upgrade_context_t g_upgrade_ctx = {
+    .this_option = NULL,
+    .firmware_fp = NULL,
+    .temp_fp = NULL,
+    .ar = NULL,
+    .disk = NULL,
+    .flags = {
+        .firmware_path = NULL,
+        .hexkey = NULL,
+        .skip_firmware_verify = xFALSE,
+        .upgrade_in_place = xFALSE,
+        .dont_print_progress = xFALSE,
+        .enable_dbus = xFALSE,
+        .key_path = NULL,
+        .stream_count = 10240,
+     }
+};
 
 #pragma pack(push, 1)
 typedef struct {
@@ -43,30 +67,30 @@ typedef struct {
     uint32_t size;
     uint8_t iv[AES_GCM_IV_LEN];
     uint8_t reserved[12];
-} image_header_t;
+} firmware_header_t;
 #pragma pack(pop)
 
-static err_t upgrade_feature_entry();
+static err_t upgrade_run(xoption self);
 static int hexchar_to_int(char c);
 static err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len);
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total);
 static void XLOG_WAITING(const char *message);
 #define notify_progress(step, percent, total, current) do { \
-    if (!enable_dbus) break; \
+    if (!g_upgrade_ctx.flags.enable_dbus) break; \
     notify_operators_t *ops = get_notify_operators(); \
     if (ops && ops->progress_changed) { \
         ops->progress_changed(step, percent, total, current); \
     } \
 } while(0)
 #define notify_message(message) do { \
-    if (!enable_dbus) break; \
+    if (!g_upgrade_ctx.flags.enable_dbus) break; \
     notify_operators_t *ops = get_notify_operators(); \
     if (ops && ops->message_logged) { \
         ops->message_logged(message); \
     } \
 } while(0)
 #define notify_message_fmt(fmt, ...) do { \
-    if (!enable_dbus) break; \
+    if (!g_upgrade_ctx.flags.enable_dbus) break; \
     xstring message = xstring_init_format(fmt, __VA_ARGS__); \
     notify_operators_t *ops = get_notify_operators(); \
     if (ops && ops->message_logged) { \
@@ -75,7 +99,7 @@ static void XLOG_WAITING(const char *message);
     xstring_free(&message); \
 } while(0)
 #define notify_error(code, message) do { \
-    if (!enable_dbus) break; \
+    if (!g_upgrade_ctx.flags.enable_dbus) break; \
     notify_operators_t *ops = get_notify_operators(); \
     if (ops && ops->error_occurred) { \
         ops->error_occurred(code, message); \
@@ -87,16 +111,34 @@ err_t upgrade_usage_init(xoption root) {
         return X_RET_INVAL;
 
     xoption upgrade = xoption_create_subcommand(root, "upgrade", "Perform a system firmware upgrade.");
-    xoption_set_post_parse_callback(upgrade, upgrade_feature_entry);
-    xoption_add_string(upgrade, 'i', "image", "<firmware.iota>", "Path to the firmware image file (.iota)", &firmware_path, xTRUE);
-    // xoption_add_boolean(upgrade, '\0', "skip-auth", "Bypass authentication tag validation (insecure)", &skip_firmware_auth);
-    xoption_add_boolean(upgrade, '\0', "skip-verify", "Bypass digital signature verification (insecure)", &skip_firmware_verify);
-    xoption_add_number(upgrade, 's', "stream-count", "<count>", "Number of bytes per data chunk for streaming decryption and verification", &stream_count, xFALSE);
-    xoption_add_string(upgrade, '\0', "verify", "<public_key.pem>", "Path to the public key PEM file for signature validation", &key_path, xFALSE);
-    xoption_add_boolean(upgrade, '\0', "in-place", "Update the current partition directly instead of switching", &upgrade_in_place);
-    xoption_add_boolean(upgrade, 'q', "no-progress", "Do not display progress information", &dont_print_progress);
-    xoption_add_string(upgrade, 'k', "key", "<hexkey>", "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.", &hexkey, xFALSE);
-    xoption_add_boolean(upgrade, '\0', "enable-dbus", "Use D-Bus to notify event", &enable_dbus);
+    xoption_set_context(upgrade, &g_upgrade_ctx);
+    xoption_set_post_parse_callback(upgrade, upgrade_run);
+    xoption_add_string(upgrade, 'f', "firmware", "<firmware.iota>",
+                       "Path to the firmware image file (.iota)",
+                       &g_upgrade_ctx.flags.firmware_path, xTRUE);
+    xoption_add_boolean(upgrade, '\0', "skip-verify",
+                        "Bypass digital signature verification (insecure)",
+                        &g_upgrade_ctx.flags.skip_firmware_verify);
+    xoption_add_number(upgrade, 's', "stream-count", "<count>",
+                       "Number of bytes per data chunk for streaming decryption and verification",
+                       &g_upgrade_ctx.flags.stream_count, xFALSE);
+    xoption_add_string(upgrade, '\0', "verify", "<public_key.pem>",
+                       "Path to the public key PEM file for signature validation",
+                       &g_upgrade_ctx.flags.key_path, xFALSE);
+    xoption_add_boolean(upgrade, '\0', "in-place",
+                        "Update the current partition directly instead of switching",
+                        &g_upgrade_ctx.flags.upgrade_in_place);
+    xoption_add_boolean(upgrade, 'q', "no-progress",
+                        "Do not display progress information",
+                        &g_upgrade_ctx.flags.dont_print_progress);
+    xoption_add_string(upgrade, 'k', "key", "<hexkey>",
+                       "Hexadecimal AES-GCM key for decryption (16 bytes, 32 hex characters). If not provided, a default key is used.",
+                       &g_upgrade_ctx.flags.hexkey, xFALSE);
+    xoption_add_boolean(upgrade, '\0', "enable-dbus",
+                        "Use D-Bus to notify event",
+                        &g_upgrade_ctx.flags.enable_dbus);
+
+    g_upgrade_ctx.this_option = upgrade;
 
     return X_RET_OK;
 }
@@ -111,55 +153,58 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
                                 xbool_t skip_auth_tag);
 
 static err_t verify_rsa_signature(FILE *in,
-                                  size_t size,
+                                  size_t length,
+                                  int stream_count,
                                   const uint8_t *signature,
                                   size_t signature_size,
                                   const char *public_key_pem_path);
 
-static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir);
+static err_t unpack_with_install(upgrade_context_t *ctx, const char *tar_gz_path, const char *output_dir);
 static err_t install_firmware(const char *firmware_dir);
 static err_t cleanup_temporary_resources();
 
 static void on_cleanup(int status, void *arg) {
-    fprintf(stderr, "\n\033[?25h");
-
     if (status != 0) {
         XLOG_W("Upgrade interrupted with signal '%s'(%d), performing cleanup", strsignal(status), status);
-    } else {
-        XLOG_D("Upgrade completed successfully, performing cleanup");
     }
-
-    if (!upgrade_in_place) unmount_inactive_partition();
-
-    cleanup_temporary_resources();
 }
 
-err_t upgrade_feature_entry() {
+err_t upgrade_run(xoption self) {
     on_exit(on_cleanup, NULL);
 
-    if (!firmware_path) {
+    upgrade_context_t *ctx = xoption_get_context(self);
+
+    if (!ctx->flags.firmware_path) {
         XLOG_E("No update image specified.");
         return X_RET_INVAL;
     }
 
-    if (enable_dbus) {
+    if (ctx->flags.enable_dbus) {
         XLOG_I("Initializing D-Bus for notifications");
         register_dbus_notify_operators();
     }
+
+    const char *firmware_path = ctx->flags.firmware_path;
+    const char *hexkey = ctx->flags.hexkey;
+    const char *key_path = ctx->flags.key_path;
+    int stream_count = ctx->flags.stream_count;
+    xbool_t skip_firmware_verify = ctx->flags.skip_firmware_verify;
+    xbool_t upgrade_in_place = ctx->flags.upgrade_in_place;
 
     XLOG_I("Starting upgrade, firmware package: '%s', verification public key file: '%s'",
            firmware_path, key_path ? key_path : "(none)");
 
     XLOG_I("Stream decryption signature verification, single stream %d bytes", stream_count);
 
-    FILE *in = os_file_open(firmware_path, "rb");
+    ctx->firmware_fp = os_file_open(firmware_path, "rb");
+    FILE *in = ctx->firmware_fp;
     if (!in) {
         XLOG_E("Failed to open update image: %s", firmware_path);
         return X_RET_ERROR;
     }
 
     err_t err = X_RET_OK;
-    image_header_t header = {0};
+    firmware_header_t header = {0};
     uint8_t tag[AES_GCM_TAG_LEN] = {0};
     uint8_t signature[RSA_SIGNATURE_LEN] = {0};
     time_t start_time = time(NULL);
@@ -169,7 +214,6 @@ err_t upgrade_feature_entry() {
     if (hexkey) {
         if (parse_hex_key(hexkey, key, AES_GCM_KEY_LEN) != X_RET_OK) {
             XLOG_E("Invalid hex key format.");
-            os_file_close(in);
             return X_RET_INVAL;
         }
     } else {
@@ -177,10 +221,9 @@ err_t upgrade_feature_entry() {
     }
 
     // Read IOTA header
-    size_t header_read_size = fread(&header, 1, sizeof(image_header_t), in);
-    if (header_read_size != sizeof(image_header_t)) {
+    size_t header_read_size = fread(&header, 1, sizeof(firmware_header_t), in);
+    if (header_read_size != sizeof(firmware_header_t)) {
         XLOG_E("Failed to read image header.");
-        os_file_close(in);
         return X_RET_ERROR;
     }
 
@@ -198,11 +241,10 @@ err_t upgrade_feature_entry() {
            header.iv[8], header.iv[9], header.iv[10], header.iv[11]);
 
     // Read IOTA AES-GCM tag
-    fseek(in, sizeof(image_header_t) + header.size - AES_GCM_TAG_LEN, SEEK_SET);
+    fseek(in, sizeof(firmware_header_t) + header.size - AES_GCM_TAG_LEN, SEEK_SET);
     size_t tag_read_size = fread(tag, 1, sizeof(tag), in);
     if (tag_read_size != sizeof(tag)) {
         XLOG_E("Failed to read firmware tag.");
-        os_file_close(in);
         return X_RET_ERROR;
     }
     // XLOG_HEX_DUMP("Image tag:", tag, sizeof(tag));
@@ -212,7 +254,6 @@ err_t upgrade_feature_entry() {
     size_t sig_read_size = fread(signature, 1, sizeof(signature), in);
     if (sig_read_size != sizeof(signature)) {
         XLOG_E("Failed to read firmware signature.");
-        os_file_close(in);
         return X_RET_ERROR;
     }
     // XLOG_HEX_DUMP("Image signature:", signature, sizeof(signature));
@@ -221,7 +262,6 @@ err_t upgrade_feature_entry() {
     // Validate magic
     if (memcmp(header.magic, magic, sizeof(magic)) != 0) {
         XLOG_E("Invalid firmware magic.");
-        os_file_close(in);
         return X_RET_BADFMT;
     }
 
@@ -229,7 +269,6 @@ err_t upgrade_feature_entry() {
     if (!skip_firmware_verify) {
         if (key_path == NULL) {
             XLOG_E("No public key PEM file specified for signature verification.");
-            os_file_close(in);
             return X_RET_INVAL;
         }
 
@@ -237,7 +276,8 @@ err_t upgrade_feature_entry() {
 
         fseek(in, 0, SEEK_SET); // Seek back to the beginning for signature verification
         err = verify_rsa_signature(in,
-                                   sizeof(image_header_t) + header.size,
+                                   sizeof(firmware_header_t) + header.size,
+                                   stream_count,
                                    signature,
                                    sizeof(signature),
                                    key_path);
@@ -245,7 +285,6 @@ err_t upgrade_feature_entry() {
         if (err != X_RET_OK) {
             notify_error(500, "Firmware signature verification failed");
             XLOG_E("Firmware signature verification failed");
-            os_file_close(in);
             return err;
         }
 
@@ -256,11 +295,11 @@ err_t upgrade_feature_entry() {
 
     XLOG_I("Decrypting firmware package");
     // Seek to the start of encrypted data
-    fseek(in, sizeof(image_header_t), SEEK_SET);
-    FILE *out = os_file_open(TEMPORARY_TARGZ_PATH, "wb");
+    fseek(in, sizeof(firmware_header_t), SEEK_SET);
+    ctx->temp_fp = os_file_open(TEMPORARY_TARGZ_PATH, "wb");
+    FILE *out = ctx->temp_fp;
     if (!out) {
         XLOG_E("Failed to open output firmware file.");
-        os_file_close(in);
         return X_RET_ERROR;
     }
 
@@ -271,17 +310,12 @@ err_t upgrade_feature_entry() {
                              (size_t)header.size,
                              tag,
                              stream_count,
-                             skip_firmware_auth);
+                             xFALSE);
     if (err != X_RET_OK) {
-        os_file_close(in);
-        os_file_close(out);
         return err;
     }
 
     XLOG_I("Firmware package decrypted successfully");
-
-    os_file_close(out);
-    os_file_close(in);
 
     if (upgrade_in_place) {
         XLOG_I("Performing In-Place update mode");
@@ -295,48 +329,29 @@ err_t upgrade_feature_entry() {
         }
     }
 
-#if 0
-    XLOG_I("Unpacking firmware package");
-    err = unpack_with_install(TEMPORARY_TARGZ_PATH, FIRMWARE_EXTRACTED_DIR);
+    XLOG_I("Unpacking and installing firmware package");
+    err = unpack_with_install(ctx, TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
     if (err != X_RET_OK) {
         XLOG_E("Failed to unpack firmware package");
         goto exit;
     }
 
-    XLOG_I("Installing firmware");
-    err = install_firmware(FIRMWARE_EXTRACTED_DIR);
-    if (err != X_RET_OK) {
-        XLOG_E("Failed to install firmware");
-        goto exit;
-    }
-#else
-    {
-        XLOG_I("Unpacking and installing firmware package");
-        err = unpack_with_install(TEMPORARY_TARGZ_PATH, upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
-        if (err != X_RET_OK) {
-            XLOG_E("Failed to unpack firmware package");
-            goto exit;
-        }
+    // Record IOTA package checksum 
+    xstring cmd = xstring_init_format("mkdir -p %s;sha256sum %s > %s/current.sha256",
+                                      upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota",
+                                      firmware_path,
+                                      upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota");
+    exec_t checksum = exec_command(xstring_to_string(&cmd));
 
-        // Record IOTA package checksum 
-        xstring cmd = xstring_init_format("mkdir -p %s;sha256sum %s > %s/current.sha256",
-                                          upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota",
-                                          firmware_path,
-                                          upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota");
-        exec_t checksum = exec_command(xstring_to_string(&cmd));
-
-        XLOG_I("Recorded firmware package checksum to %s/current.sha256",
-               upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota");
-        xstring_free(&cmd);
-        exec_free(checksum);
-    }
-#endif
+    XLOG_I("Recorded firmware package checksum to %s/current.sha256",
+           upgrade_in_place ? "/var/ota" : INACTIVE_PARTITION_MOUNT_POINT "/var/ota");
+    xstring_free(&cmd);
+    exec_free(checksum);
 
     time_t end_time = time(NULL);
     XLOG_I("Firmware upgrade completed successfully. Total time: %jd (s).", end_time - start_time);
 
 exit:
-
     return err;
 }
 
@@ -478,6 +493,7 @@ static err_t stream_decrypt_gcm(FILE *in_fp,
 
 static err_t verify_rsa_signature(FILE *in,
                                   size_t size,
+                                  int stream_count,
                                   const uint8_t *signature,
                                   size_t signature_size,
                                   const char *public_key_pem_path)
@@ -560,7 +576,7 @@ static int is_excluded(const char *path) {
     return 0;
 }
 
-static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir) {
+static err_t unpack_with_install(upgrade_context_t *ctx, const char *tar_gz_path, const char *output_dir) {
     if (!os_file_exist(tar_gz_path)) {
         XLOG_E("Firmware package file does not exist: %s", tar_gz_path);
         return X_RET_NOTENT;
@@ -572,10 +588,11 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
     la_int64_t total_size = 0, processed_size = 0;
     size_t file_count = 0;
 
-    a = archive_read_new();
+    ctx->ar = archive_read_new();
+    a = ctx->ar;
     archive_read_support_format_tar(a);
     archive_read_support_filter_all(a);  // xz, gz, bz2...
-    if (archive_read_open_filename(a, tar_gz_path, stream_count) != ARCHIVE_OK) {
+    if (archive_read_open_filename(a, tar_gz_path, ctx->flags.stream_count) != ARCHIVE_OK) {
         notify_error(500, "Failed to open archive");
         XLOG_E("Failed to open archive: %s", archive_error_string(a));
         return X_RET_ERROR;
@@ -595,12 +612,14 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
     archive_read_free(a);
 
     // Reopen for unpacking
-    a = archive_read_new();
+    ctx->ar = archive_read_new();
+    a = ctx->ar;
     archive_read_support_format_tar(a);
     archive_read_support_filter_all(a);
-    archive_read_open_filename(a, tar_gz_path, stream_count);
+    archive_read_open_filename(a, tar_gz_path, ctx->flags.stream_count);
 
-    disk = archive_write_disk_new();
+    ctx->disk = archive_write_disk_new();
+    disk = ctx->disk;
     archive_write_disk_set_options(disk,
                                    ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM |
                                    ARCHIVE_EXTRACT_ACL  | ARCHIVE_EXTRACT_FFLAGS |
@@ -645,6 +664,9 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
     archive_write_close(disk);
     archive_write_free(disk);
 
+    ctx->ar = NULL;
+    ctx->disk = NULL;
+
 #else
     xstring cmd = xstring_init_format("tar --warning=none "
                                       "--exclude=proc "
@@ -670,21 +692,6 @@ static err_t unpack_with_install(const char *tar_gz_path, const char *output_dir
     return X_RET_OK;
 }
 
-static err_t install_firmware(const char *firmware_dir) {
-    xstring cmd = xstring_init_format("cp -afr %s/* %s", firmware_dir,
-                                      upgrade_in_place ? "/" : INACTIVE_PARTITION_MOUNT_POINT);
-    exec_t output = exec_command(xstring_to_string(&cmd));
-    xstring_free(&cmd);
-
-    if (!exec_success(output)) {
-        exec_free(output);
-        return X_RET_ERROR;
-    }
-
-    exec_free(output);
-    return X_RET_OK;
-}
-
 static err_t cleanup_temporary_resources() {
     XLOG_D("Cleaning up temporary resources");
 
@@ -698,7 +705,7 @@ static err_t cleanup_temporary_resources() {
 
 static void XLOG_P(const char *prefix, const char *postfix, size_t current, size_t total) {
 
-    if (enable_dbus) {
+    if (g_upgrade_ctx.flags.enable_dbus) {
         static int last_precent = -1;
         int current_percent = 0;
 
@@ -712,7 +719,7 @@ static void XLOG_P(const char *prefix, const char *postfix, size_t current, size
         }
     }
 
-    if (dont_print_progress) return;
+    if (g_upgrade_ctx.flags.dont_print_progress) return;
 
     const int bar_width = 50;
     float progress = (float)current / total;
@@ -736,7 +743,7 @@ static void XLOG_P(const char *prefix, const char *postfix, size_t current, size
 }
 
 static void XLOG_WAITING(const char *message) {
-    if (dont_print_progress) return;
+    if (g_upgrade_ctx.flags.dont_print_progress) return;
     if (message == NULL) return;
 
     const char *dots[] = {"", ".", "..", "..."};
@@ -777,4 +784,39 @@ err_t parse_hex_key(const char *hex, uint8_t *key, size_t key_len) {
         key[i] = (high << 4) | low;
     }
     return X_RET_OK;
+}
+
+__attribute__((destructor))
+static void global_upgrade_destructor(void) {
+    // show cursor
+    fprintf(stderr, "\n\033[?25h");
+
+    chdir("/");
+
+    if (g_upgrade_ctx.firmware_fp) {
+        fclose(g_upgrade_ctx.firmware_fp);
+        g_upgrade_ctx.firmware_fp = NULL;
+    }
+
+    if (g_upgrade_ctx.temp_fp) {
+        fclose(g_upgrade_ctx.temp_fp);
+        g_upgrade_ctx.temp_fp = NULL;
+    }
+
+    if (g_upgrade_ctx.ar) {
+        archive_read_close(g_upgrade_ctx.ar);
+        archive_read_free(g_upgrade_ctx.ar);
+        g_upgrade_ctx.ar = NULL;
+    }
+
+    if (g_upgrade_ctx.disk) {
+        archive_write_close(g_upgrade_ctx.disk);
+        archive_write_free(g_upgrade_ctx.disk);
+        g_upgrade_ctx.disk = NULL;
+    }
+
+    if (!g_upgrade_ctx.flags.upgrade_in_place)
+        unmount_inactive_partition();
+
+    cleanup_temporary_resources();
 }

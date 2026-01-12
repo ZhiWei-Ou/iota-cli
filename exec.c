@@ -54,3 +54,20 @@ exec_t exec_command(const char *command) {
 }
 
 #endif /* __APPLE__ */
+
+void assert_command(const char *cmd) {
+#ifdef __APPLE__
+#else
+    xstring c = xstring_init_format("which %s", cmd);
+    exec_t r = exec_command(xstring_to_string(&c));
+    if (!exec_success(r)) {
+        XLOG_E("fw_printenv not found in PATH");
+        exit(-1);
+    }
+
+    exec_free(r);
+    xstring_free(&c);
+#endif /* __APPLE__ */
+}
+
+

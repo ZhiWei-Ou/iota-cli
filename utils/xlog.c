@@ -562,12 +562,6 @@ static inline uint64_t __now_ns(void) {
 void xlog_default_output(xlogger lgr,
                          xlog_sink s,
                          const xlog_message_t* const msg) {
-  uint64_t ns = __now_ns();
-  time_t sec = ns / 1000000000ull;
-  int ms = (int)((ns / 1000000ull) % 1000);
-  struct tm tm;
-  localtime_r(&sec, &tm);
-
   static const char* lvl_color[] = {
       [XLOG_LVL_TRACE] = "\x1b[36m",
       [XLOG_LVL_DEBUG] = "\x1b[37m",
@@ -578,19 +572,9 @@ void xlog_default_output(xlogger lgr,
   };
 
   fprintf(stderr,
-          "%s[%d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s[%s:%d] %s\x1b[0m\n",
+          "%s[%s]\x1b[0m %s\n",
           lvl_color[msg->lvl],
-          tm.tm_year + 1900,
-          tm.tm_mon + 1,
-          tm.tm_mday,
-          tm.tm_hour,
-          tm.tm_min,
-          tm.tm_sec,
-          ms,
           xlog_lvl_str(msg->lvl),
-          lvl_color[msg->lvl],
-          xlog_message_file(msg),
-          xlog_message_line(msg),
           xlog_message_data(msg));
 }
 

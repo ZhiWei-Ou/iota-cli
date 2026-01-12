@@ -26,6 +26,10 @@ exec_t exec_command(const char *command);
     xstring_free(&(exe).output); \
 } while (0)
 
+
+void assert_command(const char *cmd);
+
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
